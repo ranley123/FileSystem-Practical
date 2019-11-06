@@ -34,9 +34,9 @@ typedef struct _fcb {
     uuid_t          data_blocks[NUMBER_DIRECT_BLOCKS]; // ids of direct blocks
     uuid_t          indirectBlock; // id of indirect data block
 
-    struct timespec atime; // time of last access
-    struct timespec mtime; // time of last modification
-    struct timespec ctime; // time of last change to status
+    time_t atime; // time of last access
+    time_t mtime; // time of last modification
+    time_t ctime; // time of last change to status
 } fcb;
 
 typedef struct _dir_entry {

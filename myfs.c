@@ -172,17 +172,6 @@ static void freeSplitPath(SplitPath *path)
     free(path->savedPtrs[1]);
 }
 
-/**
- * Set a given timespec to current date and time
- * @param [out] tm - The timespec to set
- */
-static void setTimespecToNow(struct timespec *tm)
-{
-    struct timespec now;
-    timespec_get(&now, TIME_UTC);
-
-    memcpy(tm, &now, sizeof(now));
-}
 
 /**
  * Fetch the root file control block from the database
@@ -203,17 +192,18 @@ static int fetchRootFCB(fcb *rootBlock)
  * @param [out] blockToFill - The block to initialize
  * @param [in]  mode        - The mode of the newly created node
  */
-static void createDirectoryNode(fcb *blockToFill, mode_t mode)
+static void createDirectoryNode(fcb *cur_fcb, mode_t mode)
 {
-    memset(blockToFill, 0, sizeof(fcb));
-    blockToFill->mode = S_IFDIR | mode;
+    memset(cur_fcb, 0, sizeof(fcb));
+    cur_fcb->mode = S_IFDIR | mode;
 
-    setTimespecToNow(&blockToFill->ctime);
-    setTimespecToNow(&blockToFill->atime);
-    setTimespecToNow(&blockToFill->mtime);
+    time_t now = time(NULL);
+    cur_fcb->atime = now;
+    cur_fcb->mtime = now;
+    cur_fcb->ctime = now;
 
-    blockToFill->uid = getuid();
-    blockToFill->gid = getgid();
+    cur_fcb->uid = getuid();
+    cur_fcb->gid = getgid();
 }
 
 /**
@@ -221,17 +211,18 @@ static void createDirectoryNode(fcb *blockToFill, mode_t mode)
  * @param [out] blockToFill - The block to initialize
  * @param [in]  mode        - The mode of the newly created node
  */
-static void createFileNode(fcb *blockToFill, mode_t mode)
+static void createFileNode(fcb *cur_fcb, mode_t mode)
 {
-    memset(blockToFill, 0, sizeof(fcb));
-    blockToFill->mode = S_IFREG | mode;
+    memset(cur_fcb, 0, sizeof(fcb));
+    cur_fcb->mode = S_IFREG | mode;
 
-    setTimespecToNow(&blockToFill->ctime);
-    setTimespecToNow(&blockToFill->atime);
-    setTimespecToNow(&blockToFill->mtime);
+    time_t now = time(NULL);
+    cur_fcb->atime = now;
+    cur_fcb->mtime = now;
+    cur_fcb->ctime = now;
 
-    blockToFill->uid = getuid();
-    blockToFill->gid = getgid();
+    cur_fcb->uid = getuid();
+    cur_fcb->gid = getgid();
 }
 
 /**
@@ -654,9 +645,9 @@ static int myfs_getattr(const char *path, struct stat *stbuf)
     stbuf->st_uid = currentDirectory.uid;          /* User ID of the file's owner.  */
     stbuf->st_gid = currentDirectory.gid;         /* Group ID of the file's group. */
     stbuf->st_size = currentDirectory.size;            /* Size of file, in bytes.  */
-    stbuf->st_atime = currentDirectory.atime.tv_sec; /* Time of last access.  */
-    stbuf->st_mtime = currentDirectory.mtime.tv_sec; /* Time of last modification.  */
-    stbuf->st_ctime = currentDirectory.ctime.tv_sec; /* Time of last status change.  */
+    stbuf->st_atime = currentDirectory.atime; /* Time of last access.  */
+    stbuf->st_mtime = currentDirectory.mtime; /* Time of last modification.  */
+    stbuf->st_ctime = currentDirectory.ctime; /* Time of last status change.  */
 
     return 0;
 }
@@ -839,22 +830,22 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
  * @param [in] tv   - The values to which the timestamps should be set to.
  * @return 0 if successful, < 0 if an error happened.
  */
-static int myfs_utimens(const char *path, const struct timespec tv[2])
+static int myfs_utimens(const char *path, struct utimbuf *ubuf)
 {
     write_log("myfs_utimens(path=\"%s\")\n", path);
 
     fcb fcb;
-    uuid_t fcbUUID;
+    uuid_t fcb_id;
 
-    int rc = getFCBAtPath(path, &fcb, &fcbUUID);
+    int rc = getFCBAtPath(path, &fcb, &fcb_id);
 
     if (rc != 0)
         return rc;
 
-    memcpy(&fcb.atime, &tv[0], sizeof(struct timespec));
-    memcpy(&fcb.mtime, &tv[1], sizeof(struct timespec));
+    fcb.mtime = ubuf->modtime;
+    fcb.atime = ubuf->actime;
 
-    rc = unqlite_kv_store(pDb, fcbUUID, KEY_SIZE, &fcb, sizeof(fcb));
+    rc = unqlite_kv_store(pDb, fcb_id, KEY_SIZE, &fcb, sizeof(fcb));
 
     error_handler(rc);
 
