@@ -22,6 +22,9 @@ const mode_t DEFAULT_FILE_MODE = S_IFREG|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH
 
 const mode_t DEFAULT_DIR_MODE = S_IFDIR|S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH;
 
+#define max(x, y) (x > y? x: y)
+#define min(x, y) (x > y? y: x)
+
 typedef struct _fcb {
     mode_t          mode; // file mode              
     uid_t           uid; // user id                      

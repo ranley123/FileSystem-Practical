@@ -7,6 +7,19 @@
 
 #include "myfs.h"
 
+typedef struct
+{
+    char *parent;       // String containing the parent directory of a path
+    char *name;         // String containing the name of the file a path points at
+    char *savedPtrs[2]; // Pointers to be freed when the SplitPath is not needed anymore
+} SplitPath;
+
+unqlite *pDb; // Pointer used to reference the database connection
+
+uuid_t zero_uuid; // An uuid that has all its bytes set to 0
+
+dir_data emptyDirectory;
+file_data emptyFile;
 
 /**
  * Create a block iterator for the given FileControlBlock
@@ -14,7 +27,7 @@
  * @param [in] create  - Set to not 0 if you want the iterator to create new blocks when a next block is requested
  * @return - The created iterator
  */
-static fcb_iterator make_iterator(fcb *fcb, int create)
+fcb_iterator make_iterator(fcb *fcb, int create)
 {
     fcb_iterator iterator = {
         .fcb = fcb,
@@ -33,9 +46,9 @@ static fcb_iterator make_iterator(fcb *fcb, int create)
  * @param [out] blockUUID   - If not NULL, gets filled in with the uuid of the retrieved block
  * @return The pointer passed in from block, or NULL if there are no more blocks to retrieve
  */
-static void *getNextBlock(fcb_iterator *iterator, void *block, size_t blockSize, uuid_t *blockUUID)
+void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize, uuid_t *blockUUID)
 {
-    uuid_t toFetch = {0};
+    uuid_t next_block_id = {0};
 
     if (iterator->level > MAX_INDEX_LEVEL)
         return NULL;
@@ -46,16 +59,16 @@ static void *getNextBlock(fcb_iterator *iterator, void *block, size_t blockSize,
     {
         if (iterator->create && uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0)
         {
-            uuid_generate(toFetch);
-            char *nothing = calloc(sizeof(char), blockSize);
-            int rc = unqlite_kv_store(pDb, toFetch, KEY_SIZE, nothing, (ssize_t)blockSize);
-            free(nothing);
+            uuid_generate(next_block_id);
+            char *empty_block = calloc(sizeof(char), blockSize);
+            int rc = unqlite_kv_store(pDb, next_block_id, KEY_SIZE, empty_block, (ssize_t)blockSize);
+            free(empty_block);
             error_handler(rc);
-            uuid_copy(iterator->fcb->data_blocks[iterator->index], toFetch);
+            uuid_copy(iterator->fcb->data_blocks[iterator->index], next_block_id);
         }
         else
         {
-            uuid_copy(toFetch, iterator->fcb->data_blocks[iterator->index]);
+            uuid_copy(next_block_id, iterator->fcb->data_blocks[iterator->index]);
         }
 
         iterator->index += 1;
@@ -90,19 +103,19 @@ static void *getNextBlock(fcb_iterator *iterator, void *block, size_t blockSize,
 
         if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
         {
-            uuid_generate(toFetch);
-            char *nothing = calloc(sizeof(char), blockSize);
-            rc = unqlite_kv_store(pDb, toFetch, KEY_SIZE, nothing, (ssize_t)blockSize);
-            free(nothing);
+            uuid_generate(next_block_id);
+            char *empty_block = calloc(sizeof(char), blockSize);
+            rc = unqlite_kv_store(pDb, next_block_id, KEY_SIZE, empty_block, (ssize_t)blockSize);
+            free(empty_block);
             error_handler(rc);
-            uuid_copy(blocks[iterator->index], toFetch);
+            uuid_copy(blocks[iterator->index], next_block_id);
 
             rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, MAX_UUIDS_PER_BLOCK * sizeof(uuid_t));
             error_handler(rc);
         }
         else
         {
-            uuid_copy(toFetch, blocks[iterator->index]);
+            uuid_copy(next_block_id, blocks[iterator->index]);
         }
 
         iterator->index += 1;
@@ -112,48 +125,21 @@ static void *getNextBlock(fcb_iterator *iterator, void *block, size_t blockSize,
         return NULL;
     }
 
-    if (uuid_compare(toFetch, zero_uuid) == 0)
+    if (uuid_compare(next_block_id, zero_uuid) == 0)
         return NULL;
 
     if (blockUUID != NULL)
     {
-        uuid_copy(*blockUUID, toFetch);
+        uuid_copy(*blockUUID, next_block_id);
     }
 
     unqlite_int64 nBytes = (unqlite_int64)blockSize;
-    int rc = unqlite_kv_fetch(pDb, toFetch, KEY_SIZE, block, &nBytes);
+    int rc = unqlite_kv_fetch(pDb, next_block_id, KEY_SIZE, block, &nBytes);
     error_handler(rc);
 
     return block;
 }
 
-typedef struct
-{
-    char *parent;       // String containing the parent directory of a path
-    char *name;         // String containing the name of the file a path points at
-    char *savedPtrs[2]; // Pointers to be freed when the SplitPath is not needed anymore
-} SplitPath;
-
-unqlite *pDb; // Pointer used to reference the database connection
-
-uuid_t zero_uuid; // An uuid that has all its bytes set to 0
-
-dir_data emptyDirectory;
-file_data emptyFile;
-
-static ssize_t min(ssize_t a, ssize_t b)
-{
-    if (a < b)
-        return a;
-    return b;
-}
-
-static ssize_t max(ssize_t a, ssize_t b)
-{
-    if (a > b)
-        return a;
-    return b;
-}
 
 /**
  * Split a path into it's filename and parent directory
@@ -267,7 +253,7 @@ static int addFCBToDirectory(fcb *dirBlock, const char *name, const uuid_t fcb_r
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
             if (entries.used_entries == DIRECTORY_ENTRIES_PER_BLOCK)
             {
@@ -323,7 +309,7 @@ static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill,
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
 
             for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
@@ -410,7 +396,7 @@ static ssize_t numberOfChildren(const fcb *directory)
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
             noDirectories += entries.used_entries;
         }
@@ -432,7 +418,7 @@ static void removeNodeData(fcb *fcb)
 
     fcb_iterator iter = make_iterator(fcb, 0);
 
-    while (getNextBlock(&iter, fakeBlock, BLOCK_SIZE, &blockUUID))
+    while (get_next_data_block(&iter, fakeBlock, BLOCK_SIZE, &blockUUID))
     {
         int rc = unqlite_kv_delete(pDb, blockUUID, KEY_SIZE);
         error_handler(rc);
@@ -457,7 +443,7 @@ static int unlinkLinkInDirectory(const fcb *dirBlock, const char *name)
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
             for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
@@ -495,7 +481,7 @@ static int removeFileFCBinDirectory(const fcb *dirBlock, const char *name)
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
 
             for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
@@ -556,7 +542,7 @@ static int removeDirectoryFCBinDirectory(const fcb *dirBlock, const char *name)
 
         uuid_t blockUUID;
 
-        while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
             for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
@@ -704,7 +690,7 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
     uuid_t blockUUID;
 
-    while (getNextBlock(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+    while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
     {
         for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
         {
@@ -766,7 +752,7 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset, str
         fcb_iterator iter = make_iterator(&fcb, 0);
         file_data dataBlock;
 
-        while (getNextBlock(&iter, &dataBlock, sizeof(dataBlock), NULL))
+        while (get_next_data_block(&iter, &dataBlock, sizeof(dataBlock), NULL))
         {
             if (size == 0)
                 break;
@@ -929,7 +915,7 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
         file_data dataBlock;
         fcb_iterator iter = make_iterator(&fcb, 1);
 
-        while (getNextBlock(&iter, &dataBlock, sizeof(dataBlock), &blockUUID))
+        while (get_next_data_block(&iter, &dataBlock, sizeof(dataBlock), &blockUUID))
         {
             int bW = writeToBlock(&dataBlock, &buf[bytesWritten], offset, size);
             if (bW == -1)
