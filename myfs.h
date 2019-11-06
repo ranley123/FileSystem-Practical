@@ -14,6 +14,7 @@
 #define MAX_UUIDS_PER_BLOCK (BLOCK_SIZE / sizeof(uuid_t))
 
 #define NUMBER_DIRECT_BLOCKS 12
+#define MAX_INDEX_LEVEL 1
 
 #define MAX_FILE_SIZE (BLOCK_SIZE * NUMBER_DIRECT_BLOCKS + BLOCK_SIZE * MAX_UUIDS_PER_BLOCK)
 
@@ -52,6 +53,13 @@ typedef struct _file_data {
     char data[BLOCK_SIZE]; // data
 } file_data;
 
+typedef struct
+{
+    fcb *fcb;
+    int level;
+    int index;
+    int create; // for 1, it will create a new empty block
+} fcb_iterator;
 
 // We need to use a well-known value as a key for the root object.
 const uuid_t ROOT_OBJECT_KEY = "root";

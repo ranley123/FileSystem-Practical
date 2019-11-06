@@ -7,31 +7,22 @@
 
 #include "myfs.h"
 
-#define MAX_INDIRECTION_LEVEL 1
-
-typedef struct
-{
-    fcb *fcb;
-    size_t idx;
-    size_t level;
-    int extends; // set to not 0 if this should allocate blocks that it doesn't find
-} FCBBlockIterator;
 
 /**
  * Create a block iterator for the given FileControlBlock
  * @param [in] fcb      - The file control block whose data blocks to iterate
- * @param [in] extends  - Set to not 0 if you want the iterator to create new blocks when a next block is requested
+ * @param [in] create  - Set to not 0 if you want the iterator to create new blocks when a next block is requested
  * @return - The created iterator
  */
-static FCBBlockIterator makeBlockIterator(fcb *fcb, int extends)
+static fcb_iterator make_iterator(fcb *fcb, int create)
 {
-    FCBBlockIterator result = {
+    fcb_iterator iterator = {
         .fcb = fcb,
-        .idx = 0,
         .level = 0,
-        .extends = extends};
+        .index = 0,
+        .create = create};
 
-    return result;
+    return iterator;
 }
 
 /**
@@ -42,47 +33,47 @@ static FCBBlockIterator makeBlockIterator(fcb *fcb, int extends)
  * @param [out] blockUUID   - If not NULL, gets filled in with the uuid of the retrieved block
  * @return The pointer passed in from block, or NULL if there are no more blocks to retrieve
  */
-static void *getNextBlock(FCBBlockIterator *iterator, void *block, size_t blockSize, uuid_t *blockUUID)
+static void *getNextBlock(fcb_iterator *iterator, void *block, size_t blockSize, uuid_t *blockUUID)
 {
     uuid_t toFetch = {0};
 
-    if (iterator->level > MAX_INDIRECTION_LEVEL)
+    if (iterator->level > MAX_INDEX_LEVEL)
         return NULL;
 
     switch (iterator->level)
     {
     case 0:
     {
-        if (iterator->extends && uuid_compare(iterator->fcb->data_blocks[iterator->idx], zero_uuid) == 0)
+        if (iterator->create && uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0)
         {
             uuid_generate(toFetch);
             char *nothing = calloc(sizeof(char), blockSize);
             int rc = unqlite_kv_store(pDb, toFetch, KEY_SIZE, nothing, (ssize_t)blockSize);
             free(nothing);
             error_handler(rc);
-            uuid_copy(iterator->fcb->data_blocks[iterator->idx], toFetch);
+            uuid_copy(iterator->fcb->data_blocks[iterator->index], toFetch);
         }
         else
         {
-            uuid_copy(toFetch, iterator->fcb->data_blocks[iterator->idx]);
+            uuid_copy(toFetch, iterator->fcb->data_blocks[iterator->index]);
         }
 
-        iterator->idx += 1;
-        if (iterator->idx >= NUMBER_DIRECT_BLOCKS)
+        iterator->index += 1;
+        if (iterator->index >= NUMBER_DIRECT_BLOCKS)
         {
-            iterator->idx = 0;
+            iterator->index = 0;
             iterator->level += 1;
         }
     }
     break;
     case 1:
     {
-        if (iterator->idx >= MAX_UUIDS_PER_BLOCK)
+        if (iterator->index >= MAX_UUIDS_PER_BLOCK)
             return NULL;
         uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}};
         if (uuid_compare(iterator->fcb->indirectBlock, zero_uuid) == 0)
         {
-            if (iterator->extends)
+            if (iterator->create)
             {
                 uuid_generate(iterator->fcb->indirectBlock);
                 int rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
@@ -97,24 +88,24 @@ static void *getNextBlock(FCBBlockIterator *iterator, void *block, size_t blockS
         int rc = unqlite_kv_fetch(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, &nBytes);
         error_handler(rc);
 
-        if (iterator->extends && uuid_compare(blocks[iterator->idx], zero_uuid) == 0)
+        if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
         {
             uuid_generate(toFetch);
             char *nothing = calloc(sizeof(char), blockSize);
             rc = unqlite_kv_store(pDb, toFetch, KEY_SIZE, nothing, (ssize_t)blockSize);
             free(nothing);
             error_handler(rc);
-            uuid_copy(blocks[iterator->idx], toFetch);
+            uuid_copy(blocks[iterator->index], toFetch);
 
             rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, MAX_UUIDS_PER_BLOCK * sizeof(uuid_t));
             error_handler(rc);
         }
         else
         {
-            uuid_copy(toFetch, blocks[iterator->idx]);
+            uuid_copy(toFetch, blocks[iterator->index]);
         }
 
-        iterator->idx += 1;
+        iterator->index += 1;
     }
     break;
     default:
@@ -271,7 +262,7 @@ static int addFCBToDirectory(fcb *dirBlock, const char *name, const uuid_t fcb_r
 
     if (S_ISDIR(dirBlock->mode))
     {
-        FCBBlockIterator iter = makeBlockIterator(dirBlock, 1);
+        fcb_iterator iter = make_iterator(dirBlock, 1);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -327,7 +318,7 @@ static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill,
 
     if (S_ISDIR(dirBlock->mode))
     {
-        FCBBlockIterator iter = makeBlockIterator(dirBlock, 0);
+        fcb_iterator iter = make_iterator(dirBlock, 0);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -414,7 +405,7 @@ static ssize_t numberOfChildren(const fcb *directory)
     if (S_ISDIR(directory->mode))
     {
         ssize_t noDirectories = 0;
-        FCBBlockIterator iter = makeBlockIterator(directory, 0);
+        fcb_iterator iter = make_iterator(directory, 0);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -439,7 +430,7 @@ static void removeNodeData(fcb *fcb)
     char fakeBlock[BLOCK_SIZE];
     uuid_t blockUUID;
 
-    FCBBlockIterator iter = makeBlockIterator(fcb, 0);
+    fcb_iterator iter = make_iterator(fcb, 0);
 
     while (getNextBlock(&iter, fakeBlock, BLOCK_SIZE, &blockUUID))
     {
@@ -461,7 +452,7 @@ static int unlinkLinkInDirectory(const fcb *dirBlock, const char *name)
 
     if (dirBlock->mode & S_IFDIR)
     {
-        FCBBlockIterator iter = makeBlockIterator(dirBlock, 0);
+        fcb_iterator iter = make_iterator(dirBlock, 0);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -499,7 +490,7 @@ static int removeFileFCBinDirectory(const fcb *dirBlock, const char *name)
 
     if (dirBlock->mode & S_IFDIR)
     {
-        FCBBlockIterator iter = makeBlockIterator(dirBlock, 0);
+        fcb_iterator iter = make_iterator(dirBlock, 0);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -560,7 +551,7 @@ static int removeDirectoryFCBinDirectory(const fcb *dirBlock, const char *name)
 
     if (dirBlock->mode & S_IFDIR)
     {
-        FCBBlockIterator iter = makeBlockIterator(dirBlock, 0);
+        fcb_iterator iter = make_iterator(dirBlock, 0);
         dir_data entries;
 
         uuid_t blockUUID;
@@ -708,7 +699,7 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
 
-    FCBBlockIterator iter = makeBlockIterator(&currentDirectory, 0);
+    fcb_iterator iter = make_iterator(&currentDirectory, 0);
     dir_data entries;
 
     uuid_t blockUUID;
@@ -772,7 +763,7 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset, str
     if (S_ISREG(fcb.mode))
     {
 
-        FCBBlockIterator iter = makeBlockIterator(&fcb, 0);
+        fcb_iterator iter = make_iterator(&fcb, 0);
         file_data dataBlock;
 
         while (getNextBlock(&iter, &dataBlock, sizeof(dataBlock), NULL))
@@ -936,7 +927,7 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
     {
         uuid_t blockUUID;
         file_data dataBlock;
-        FCBBlockIterator iter = makeBlockIterator(&fcb, 1);
+        fcb_iterator iter = make_iterator(&fcb, 1);
 
         while (getNextBlock(&iter, &dataBlock, sizeof(dataBlock), &blockUUID))
         {
