@@ -1109,25 +1109,27 @@ static int myfs_mkdir(const char *path, mode_t mode)
     if (strlen(filename) >= MAX_FILENAME_LENGTH)
         return -ENAMETOOLONG;
 
-    fcb currentDir;
-    uuid_t parentFCBUUID;
-    int rc = get_fcb_by_path(path, &currentDir, &parentFCBUUID, 1);
-
+    // get fcb of parent directory
+    fcb parent_dir; 
+    uuid_t parent_dir_id;
+    int rc = get_fcb_by_path(path, &parent_dir, &parent_dir_id, 1);
     if (rc != 0)
         return rc;
 
-    fcb newDirectory;
-    uuid_t newDirectoryRef = {0};
-    make_new_fcb(&newDirectory, mode, 1);
-    uuid_generate(newDirectoryRef);
+    // set up a new directory fcb
+    fcb new_dir;
+    uuid_t new_dir_id = {0};
+    make_new_fcb(&new_dir, mode, 1);
+    uuid_generate(new_dir_id);
 
-    rc = unqlite_kv_store(pDb, newDirectoryRef, KEY_SIZE, &newDirectory, sizeof newDirectory);
-    error_handler(rc);
+    // write the new dir to the database
+    write_to_db(new_dir_id, &new_dir, sizeof(fcb));
 
-    rc = add_fcb_to_dir(&currentDir, filename, newDirectoryRef);
+    // write the new dir entry to the parent dic
+    rc = add_fcb_to_dir(&parent_dir, filename, new_dir_id);
 
-    int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
-    error_handler(dbRc);
+    // update the parent dir in the database
+    write_to_db(parent_dir_id, &parent_dir, sizeof(fcb));
 
     return rc;
 }
