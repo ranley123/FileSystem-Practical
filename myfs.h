@@ -44,11 +44,11 @@ typedef struct _dir_entry {
     char name[MAX_FILENAME_LENGTH]; // filename
 } dir_entry;
 
-#define DIRECTORY_ENTRIES_PER_BLOCK (BLOCK_SIZE / sizeof(dir_entry))
+#define MAX_DIRECTORY_ENTRIES_PER_BLOCK (BLOCK_SIZE / sizeof(dir_entry))
 
 typedef struct _dir_data {
     int used_entries; // used entries                                
-    dir_entry entries[DIRECTORY_ENTRIES_PER_BLOCK]; 
+    dir_entry entries[MAX_DIRECTORY_ENTRIES_PER_BLOCK]; 
 } dir_data;
 
 typedef struct _file_data {

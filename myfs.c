@@ -64,6 +64,18 @@ void read_from_db(uuid_t id, void *data, size_t size)
 }
 
 /**
+ * Write fcb back to the database
+ * @param id 	- Given the id, store
+ * @param data 	- data to be put into the database
+ * @param size 	- size of data
+ */
+void write_to_db(uuid_t id, void *data, size_t size)
+{
+	int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
+	error_handler(rc);
+}
+
+/**
  * Get the next block from a given FCB block iterator
  * @param [in]  iterator    - The iterator to retrieve the next block from
  * @param [out] block       - The data block to fill in with the retrieved block
@@ -239,45 +251,47 @@ static void make_new_fcb(fcb *cur_fcb, mode_t mode, int dir)
  * @param [in]      fcb_ref  - The uuid reference to the node to link to
  * @return 0 if successful, < 0 if an error happened.
  */
-static int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
+int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
 {
     if (strlen(name) >= MAX_FILENAME_LENGTH)
         return -ENAMETOOLONG;
 
     if (!S_ISDIR(parent_dir_fcb->mode))
         return -ENOTDIR;
+
     fcb_iterator iterator = make_iterator(parent_dir_fcb, 1);
-    dir_data entries;
+    dir_data parent_dir_data;
+    uuid_t data_block_id;
 
-    uuid_t blockUUID;
-
-    while (get_next_data_block(&iterator, &entries, sizeof(entries), &blockUUID) != NULL)
+    while (get_next_data_block(&iterator, &parent_dir_data, sizeof(parent_dir_data), &data_block_id) != NULL)
     {
-        if (entries.used_entries == DIRECTORY_ENTRIES_PER_BLOCK)
+        if (parent_dir_data.used_entries == MAX_DIRECTORY_ENTRIES_PER_BLOCK)
             continue;
 
-        for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
-        {
-            if (strcmp(entries.entries[i].name, name) == 0)
-                return -EEXIST; // file already exists
-        }
+        // for (int index = 0; index < DIRECTORY_ENTRIES_PER_BLOCK; index++)
+        // {
+        //     if (strcmp(parent_dir_data.entries[index].name, name) == 0)
+        //         return -EEXIST; // file already exists
+        // }
 
-        for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+        for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
         {
-            if (strcmp(entries.entries[i].name, "") == 0)
+            if (strcmp(parent_dir_data.entries[i].name, "") == 0)
             {
-                strcpy(entries.entries[i].name, name);
-                uuid_copy(entries.entries[i].fcb_id, fcb_id);
+                // set up the current empty entry
+                uuid_copy(parent_dir_data.entries[i].fcb_id, fcb_id);
+                strcpy(parent_dir_data.entries[i].name, name);
+                // update the used count
+                parent_dir_data.used_entries += 1;
 
-                entries.used_entries += 1;
-                int rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
-                error_handler(rc);
+                // update the parent dir data
+                write_to_db(data_block_id, &parent_dir_data, sizeof(dir_data));
                 return 0;
             }
         }
     }
 
-    return -ENOSPC;
+    return -ENOSPC; // no extra space 
 }
 
 /**
@@ -303,7 +317,7 @@ static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill,
         while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
 
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+            for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
                 if (strcmp(entries.entries[i].name, name) == 0)
                 {
@@ -339,7 +353,7 @@ static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill,
  * @param [out] uuidToFill  - If not NULL, this is filled in with the uuid of the retrieved block
  * @return 0 if successful, < 0 if an error happened.
  */
-static int getFCBAtPath(const char *path, fcb *toFill, uuid_t *uuidToFill)
+static int get_fcb_by_path(const char *path, fcb *toFill, uuid_t *uuidToFill, int get_parent)
 {
 
     char *pathCopy = strdup(path);
@@ -436,7 +450,7 @@ static int unlinkLinkInDirectory(const fcb *dirBlock, const char *name)
 
         while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+            for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
                 if (strcmp(entries.entries[i].name, name) == 0)
                 {
@@ -475,7 +489,7 @@ static int removeFileFCBinDirectory(const fcb *dirBlock, const char *name)
         while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
 
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+            for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
                 if (strcmp(entries.entries[i].name, name) == 0)
                 {
@@ -535,7 +549,7 @@ static int removeDirectoryFCBinDirectory(const fcb *dirBlock, const char *name)
 
         while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
         {
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+            for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
             {
                 if (strcmp(entries.entries[i].name, name) == 0)
                 {
@@ -635,7 +649,7 @@ static int myfs_getattr(const char *path, struct stat *stbuf)
 
     fcb currentDirectory;
 
-    int rc = getFCBAtPath(path, &currentDirectory, NULL);
+    int rc = get_fcb_by_path(path, &currentDirectory, NULL, 0);
 
     if (rc != 0)
         return rc;
@@ -669,7 +683,7 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
     fcb currentDirectory;
 
-    int rc = getFCBAtPath(path, &currentDirectory, NULL);
+    int rc = get_fcb_by_path(path, &currentDirectory, NULL, 0);
     if (rc != 0)
         return rc;
 
@@ -683,7 +697,7 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
     while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
     {
-        for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+        for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
         {
             if (strcmp(entries.entries[i].name, "") != 0)
             {
@@ -731,7 +745,7 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset, str
 
     fcb fcb;
 
-    int rc = getFCBAtPath(path, &fcb, NULL);
+    int rc = get_fcb_by_path(path, &fcb, NULL, 0);
 
     if (rc != 0)
         return rc;
@@ -791,7 +805,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     fcb currentDir;
 
     uuid_t parentFCBUUID;
-    int rc = getFCBAtPath(newPath.parent, &currentDir, &parentFCBUUID);
+    int rc = get_fcb_by_path(newPath.parent, &currentDir, &parentFCBUUID, 1);
 
     if (rc != 0)
     {
@@ -837,7 +851,7 @@ static int myfs_utimens(const char *path, struct utimbuf *ubuf)
     fcb fcb;
     uuid_t fcb_id;
 
-    int rc = getFCBAtPath(path, &fcb, &fcb_id);
+    int rc = get_fcb_by_path(path, &fcb, &fcb_id, 0);
 
     if (rc != 0)
         return rc;
@@ -890,7 +904,7 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
 
     fcb fcb;
     uuid_t fileUUID;
-    int rc = getFCBAtPath(path, &fcb, &fileUUID);
+    int rc = get_fcb_by_path(path, &fcb, &fileUUID, 0);
 
     if (rc != 0)
         return rc;
@@ -958,7 +972,7 @@ static int myfs_truncate(const char *path, off_t newSize)
     uuid_t fileUUID;
     fcb fileToResize;
 
-    int rc = getFCBAtPath(path, &fileToResize, &fileUUID);
+    int rc = get_fcb_by_path(path, &fileToResize, &fileUUID, 0);
 
     if (rc != 0)
         return rc;
@@ -1088,7 +1102,7 @@ static int myfs_chmod(const char *path, mode_t mode)
 
     fcb block;
     uuid_t blockUUID;
-    int rc = getFCBAtPath(path, &block, &blockUUID);
+    int rc = get_fcb_by_path(path, &block, &blockUUID, 0);
 
     if (rc != 0)
         return rc;
@@ -1116,7 +1130,7 @@ static int myfs_chown(const char *path, uid_t uid, gid_t gid)
     fcb block;
     uuid_t blockUUID;
 
-    int rc = getFCBAtPath(path, &block, &blockUUID);
+    int rc = get_fcb_by_path(path, &block, &blockUUID, 0);
 
     if (rc != 0)
         return rc;
@@ -1151,7 +1165,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
 
     fcb currentDir;
     uuid_t parentFCBUUID;
-    int rc = getFCBAtPath(newPath.parent, &currentDir, &parentFCBUUID);
+    int rc = get_fcb_by_path(newPath.parent, &currentDir, &parentFCBUUID, 1);
 
     if (rc != 0)
     {
@@ -1196,7 +1210,7 @@ static int myfs_unlink(const char *path)
 
     fcb parentDir;
 
-    int rc = getFCBAtPath(pathToRemove.parent, &parentDir, NULL);
+    int rc = get_fcb_by_path(pathToRemove.parent, &parentDir, NULL, 1);
 
     if (rc != 0)
     {
@@ -1224,7 +1238,7 @@ static int myfs_rmdir(const char *path)
 
     fcb parentDir;
 
-    int rc = getFCBAtPath(pathToRemove.parent, &parentDir, NULL);
+    int rc = get_fcb_by_path(pathToRemove.parent, &parentDir, NULL, 1);
 
     if (rc != 0)
     {
@@ -1240,121 +1254,121 @@ static int myfs_rmdir(const char *path)
 
 static int myfs_rename(const char *from, const char *to)
 {
-    write_log("myfs_rename(from=\"%s\", to=\"%s\")", from, to);
+    // write_log("myfs_rename(from=\"%s\", to=\"%s\")", from, to);
 
-    SplitPath fromPath = splitPath(from);
+    // SplitPath fromPath = splitPath(from);
 
-    uuid_t sourceDirUUID;
-    fcb sourceDirFCB;
+    // uuid_t sourceDirUUID;
+    // fcb sourceDirFCB;
 
-    int rc = getFCBAtPath(fromPath.parent, &sourceDirFCB, &sourceDirUUID);
-    if (rc != 0)
-    {
-        freeSplitPath(&fromPath);
-        return rc;
-    }
-    uuid_t sourceUUID;
-    fcb sourceFCB;
+    // int rc = get_fcb_by_path(fromPath.parent, &sourceDirFCB, &sourceDirUUID);
+    // if (rc != 0)
+    // {
+    //     freeSplitPath(&fromPath);
+    //     return rc;
+    // }
+    // uuid_t sourceUUID;
+    // fcb sourceFCB;
 
-    rc = getFCBInDirectory(&sourceDirFCB, fromPath.name, &sourceFCB, &sourceUUID);
-    if (rc != 0)
-    {
-        freeSplitPath(&fromPath);
-        return rc;
-    }
+    // rc = getFCBInDirectory(&sourceDirFCB, fromPath.name, &sourceFCB, &sourceUUID);
+    // if (rc != 0)
+    // {
+    //     freeSplitPath(&fromPath);
+    //     return rc;
+    // }
 
-    SplitPath toPath = splitPath(to);
+    // SplitPath toPath = splitPath(to);
 
-    uuid_t targetDirUUID = {0};
-    fcb targetParentFCB;
-    fcb *targetParentFCBPtr;
+    // uuid_t targetDirUUID = {0};
+    // fcb targetParentFCB;
+    // fcb *targetParentFCBPtr;
 
-    if (strcmp(toPath.parent, fromPath.parent) == 0)
-    {
-        targetParentFCBPtr = &sourceDirFCB;
-        uuid_copy(targetDirUUID, sourceDirUUID);
-    }
-    else
-    {
-        targetParentFCBPtr = &targetParentFCB;
-        rc = getFCBAtPath(toPath.parent, targetParentFCBPtr, &targetDirUUID);
-        if (rc != 0)
-        {
-            freeSplitPath(&fromPath);
-            freeSplitPath(&toPath);
-            return rc;
-        }
-    }
+    // if (strcmp(toPath.parent, fromPath.parent) == 0)
+    // {
+    //     targetParentFCBPtr = &sourceDirFCB;
+    //     uuid_copy(targetDirUUID, sourceDirUUID);
+    // }
+    // else
+    // {
+    //     targetParentFCBPtr = &targetParentFCB;
+    //     rc = get_fcb_by_path(toPath.parent, targetParentFCBPtr, &targetDirUUID, 1);
+    //     if (rc != 0)
+    //     {
+    //         freeSplitPath(&fromPath);
+    //         freeSplitPath(&toPath);
+    //         return rc;
+    //     }
+    // }
 
-    fcb targetFcb;
+    // fcb targetFcb;
 
-    rc = getFCBInDirectory(targetParentFCBPtr, toPath.name, &targetFcb, NULL);
+    // rc = getFCBInDirectory(targetParentFCBPtr, toPath.name, &targetFcb, NULL);
 
-    if (rc == 0)
-    {
-        if (S_ISDIR(targetFcb.mode))
-        {
-            rc = removeDirectoryFCBinDirectory(targetParentFCBPtr, toPath.name);
-            if (rc != 0)
-            {
-                freeSplitPath(&fromPath);
-                freeSplitPath(&toPath);
-                return rc;
-            }
-        }
-        else
-        {
-            rc = removeFileFCBinDirectory(targetParentFCBPtr, toPath.name);
-            if (rc != 0)
-            {
-                freeSplitPath(&fromPath);
-                freeSplitPath(&toPath);
-                return rc;
-            }
-        }
+    // if (rc == 0)
+    // {
+    //     if (S_ISDIR(targetFcb.mode))
+    //     {
+    //         rc = removeDirectoryFCBinDirectory(targetParentFCBPtr, toPath.name);
+    //         if (rc != 0)
+    //         {
+    //             freeSplitPath(&fromPath);
+    //             freeSplitPath(&toPath);
+    //             return rc;
+    //         }
+    //     }
+    //     else
+    //     {
+    //         rc = removeFileFCBinDirectory(targetParentFCBPtr, toPath.name);
+    //         if (rc != 0)
+    //         {
+    //             freeSplitPath(&fromPath);
+    //             freeSplitPath(&toPath);
+    //             return rc;
+    //         }
+    //     }
 
-        rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
-        if (rc != 0)
-        {
-            freeSplitPath(&fromPath);
-            freeSplitPath(&toPath);
-            return rc;
-        }
-    }
-    else if (rc == -ENOENT)
-    {
-        rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
-        if (rc != 0)
-        {
-            freeSplitPath(&fromPath);
-            freeSplitPath(&toPath);
-            return rc;
-        }
-    }
-    else
-    {
-        freeSplitPath(&fromPath);
-        freeSplitPath(&toPath);
-        return rc;
-    }
+    //     rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
+    //     if (rc != 0)
+    //     {
+    //         freeSplitPath(&fromPath);
+    //         freeSplitPath(&toPath);
+    //         return rc;
+    //     }
+    // }
+    // else if (rc == -ENOENT)
+    // {
+    //     rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
+    //     if (rc != 0)
+    //     {
+    //         freeSplitPath(&fromPath);
+    //         freeSplitPath(&toPath);
+    //         return rc;
+    //     }
+    // }
+    // else
+    // {
+    //     freeSplitPath(&fromPath);
+    //     freeSplitPath(&toPath);
+    //     return rc;
+    // }
 
-    rc = unlinkLinkInDirectory(&sourceDirFCB, fromPath.name);
-    if (rc != 0)
-    {
-        freeSplitPath(&fromPath);
-        freeSplitPath(&toPath);
-        return rc;
-    }
+    // rc = unlinkLinkInDirectory(&sourceDirFCB, fromPath.name);
+    // if (rc != 0)
+    // {
+    //     freeSplitPath(&fromPath);
+    //     freeSplitPath(&toPath);
+    //     return rc;
+    // }
 
-    rc = unqlite_kv_store(pDb, targetDirUUID, KEY_SIZE, targetParentFCBPtr, sizeof(targetParentFCB));
-    error_handler(rc);
+    // rc = unqlite_kv_store(pDb, targetDirUUID, KEY_SIZE, targetParentFCBPtr, sizeof(targetParentFCB));
+    // error_handler(rc);
 
-    rc = unqlite_kv_store(pDb, sourceDirUUID, KEY_SIZE, &sourceDirFCB, sizeof(sourceDirFCB));
-    error_handler(rc);
+    // rc = unqlite_kv_store(pDb, sourceDirUUID, KEY_SIZE, &sourceDirFCB, sizeof(sourceDirFCB));
+    // error_handler(rc);
 
-    freeSplitPath(&fromPath);
-    freeSplitPath(&toPath);
-    return 0;
+    // freeSplitPath(&fromPath);
+    // freeSplitPath(&toPath);
+    // return 0;
 }
 
 // This struct contains pointers to all the functions defined above
