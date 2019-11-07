@@ -7,13 +7,6 @@
 
 #include "myfs.h"
 
-typedef struct
-{
-    char *parent;       // String containing the parent directory of a path
-    char *name;         // String containing the name of the file a path points at
-    char *savedPtrs[2]; // Pointers to be freed when the SplitPath is not needed anymore
-} SplitPath;
-
 unqlite *pDb; // Pointer used to reference the database connection
 
 uuid_t zero_uuid; // An uuid that has all its bytes set to 0
@@ -45,22 +38,22 @@ fcb_iterator make_iterator(fcb *fcb, int create)
  */
 void read_from_db(uuid_t id, void *data, size_t size)
 {
-	int rc;
-	unqlite_int64 nBytes = size;
+    int rc;
+    unqlite_int64 nBytes = size;
 
-	// check if correct results found
-	rc = unqlite_kv_fetch(pDb, id, KEY_SIZE, NULL, &nBytes);
-	error_handler(rc);
+    // check if correct results found
+    rc = unqlite_kv_fetch(pDb, id, KEY_SIZE, NULL, &nBytes);
+    error_handler(rc);
 
-	// check if we retrieved the correct thing with correct size
-	if (nBytes != size)
-	{
-		write_log("fetch: Unexpected size. Expected %d, current %d\n", size, nBytes);
-		exit(-1);
-	}
+    // check if we retrieved the correct thing with correct size
+    if (nBytes != size)
+    {
+        write_log("fetch: Unexpected size. Expected %d, current %d\n", size, nBytes);
+        exit(-1);
+    }
 
-	// retrieve the fcb
-	unqlite_kv_fetch(pDb, id, KEY_SIZE, data, &nBytes);
+    // retrieve the fcb
+    unqlite_kv_fetch(pDb, id, KEY_SIZE, data, &nBytes);
 }
 
 /**
@@ -71,8 +64,8 @@ void read_from_db(uuid_t id, void *data, size_t size)
  */
 void write_to_db(uuid_t id, void *data, size_t size)
 {
-	int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
-	error_handler(rc);
+    int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
+    error_handler(rc);
 }
 
 /**
@@ -178,37 +171,6 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize,
 }
 
 /**
- * Split a path into it's filename and parent directory
- * @param [in]  path - The path to split
- * @return A SplitPath object containing the 2 parts of the path
- */
-// static SplitPath splitPath(const char *path)
-// {
-//     char *basenameCopy = strdup(path);
-//     char *dirnameCopy = strdup(path);
-
-//     char *bn = basename(basenameCopy);
-//     char *dn = dirname(dirnameCopy);
-
-//     SplitPath result = {
-//         .parent = dn,
-//         .name = bn,
-//         .savedPtrs = {dirnameCopy, basenameCopy}};
-
-//     return result;
-// }
-
-// /**
-//  * Free the pointers of a split path.
-//  * @param [in]  path - The SplitPath object to be freed
-//  */
-// static void freeSplitPath(SplitPath *path)
-// {
-//     free(path->savedPtrs[0]);
-//     free(path->savedPtrs[1]);
-// }
-
-/**
  * Fetch the root file control block from the database
  * @param [out] rootBlock - The block to be filled in with the root FCB
  * @return 0 if successful, <0 if an error happened.
@@ -230,11 +192,11 @@ static int get_root_fcb(fcb *root_fcb)
 static void make_new_fcb(fcb *cur_fcb, mode_t mode, int dir)
 {
     memset(cur_fcb, 0, sizeof(fcb));
-    if(dir)
+    if (dir)
         cur_fcb->mode = S_IFDIR | mode;
     else
         cur_fcb->mode = S_IFREG | mode;
-    
+
     time_t now = time(NULL);
     cur_fcb->atime = now;
     cur_fcb->mtime = now;
@@ -291,7 +253,7 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
         }
     }
 
-    return -ENOSPC; // no extra space 
+    return -ENOSPC; // no extra space
 }
 
 /**
@@ -360,7 +322,8 @@ static int get_fcb_by_path(const char *path, fcb *toFill, uuid_t *uuidToFill, in
     char *path_remaining;
 
     // if parent fcb wanted, remove the base name
-    if(get_parent){
+    if (get_parent)
+    {
         path_copy = dirname(path_copy);
     }
 
@@ -637,10 +600,6 @@ static void init_fs()
     }
 }
 
-// The functions which follow are handler functions for various things a filesystem needs to do:
-// reading, getting attributes, truncating, etc. They will be called by FUSE whenever it needs
-// your filesystem to do something, so this is where functionality goes.
-
 /**
  * Get file and directory attributes (meta-data).
  * @param [in]  path    - The path of the file whose metadata to retrieve
@@ -651,21 +610,20 @@ static int myfs_getattr(const char *path, struct stat *stbuf)
 {
     write_log("myfs_getattr(path=\"%s\")\n", path);
 
-    fcb currentDirectory;
-
-    int rc = get_fcb_by_path(path, &currentDirectory, NULL, 0);
+    fcb cur_dir;
+    int rc = get_fcb_by_path(path, &cur_dir, NULL, 0);
 
     if (rc != 0)
         return rc;
 
-    stbuf->st_mode = currentDirectory.mode;   /* File mode.  */
-    stbuf->st_nlink = 2;                      /* Link count.  */
-    stbuf->st_uid = currentDirectory.uid;     /* User ID of the file's owner.  */
-    stbuf->st_gid = currentDirectory.gid;     /* Group ID of the file's group. */
-    stbuf->st_size = currentDirectory.size;   /* Size of file, in bytes.  */
-    stbuf->st_atime = currentDirectory.atime; /* Time of last access.  */
-    stbuf->st_mtime = currentDirectory.mtime; /* Time of last modification.  */
-    stbuf->st_ctime = currentDirectory.ctime; /* Time of last status change.  */
+    stbuf->st_mode = cur_dir.mode;   /* File mode.  */
+    stbuf->st_nlink = 2;             /* Link count.  */
+    stbuf->st_uid = cur_dir.uid;     /* User ID of the file's owner.  */
+    stbuf->st_gid = cur_dir.gid;     /* Group ID of the file's group. */
+    stbuf->st_size = cur_dir.size;   /* Size of file, in bytes.  */
+    stbuf->st_atime = cur_dir.atime; /* Time of last access.  */
+    stbuf->st_mtime = cur_dir.mtime; /* Time of last modification.  */
+    stbuf->st_ctime = cur_dir.ctime; /* Time of last status change.  */
 
     return 0;
 }
@@ -798,49 +756,33 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     write_log("myfs_create(path=\"%s\", mode=0%03o, fi=0x%08x)\n", path, mode, fi);
 
-    // SplitPath newPath = splitPath(path);
     char *path_copy = strdup(path);
     char *filename = basename(path_copy);
+    fcb cur_dir;
+    uuid_t cur_dir_id;
+    fcb new_file_fcb;
+    uuid_t new_file_fcb_id = {0};
 
     if (strlen(filename) >= MAX_FILENAME_LENGTH)
-    {
-        // freeSplitPath(&newPath);
         return -ENAMETOOLONG;
-    }
 
-    fcb currentDir;
+    int rc = get_fcb_by_path(path, &cur_dir, &cur_dir_id, 1);
+    if (rc != 0)
+        return rc;
 
-    uuid_t parentFCBUUID;
-    int rc = get_fcb_by_path(path, &currentDir, &parentFCBUUID, 1);
+    // make a new file fcb
+    make_new_fcb(&new_file_fcb, mode, 0);
+    // generate a new fcb id for the new fcb
+    uuid_generate(new_file_fcb_id);
 
-    // if (rc != 0)
-    // {
-    //     freeSplitPath(&newPath);
-    //     return rc;
-    // }
+    // store the new fcb into database
+    write_to_db(new_file_fcb_id, &new_file_fcb, sizeof(fcb));
+    
+    // update parent directory entries
+    rc = add_fcb_to_dir(&cur_dir, filename, new_file_fcb_id);
 
-    fcb newFCB;
-
-    make_new_fcb(&newFCB, mode, 0);
-
-    uuid_t newFileRef = {0};
-
-    uuid_generate(newFileRef);
-
-    rc = unqlite_kv_store(pDb, newFileRef, KEY_SIZE, &newFCB, sizeof newFCB);
-
-    error_handler(rc);
-
-    rc = add_fcb_to_dir(&currentDir, filename, newFileRef);
-
-    // In case new blocks were added.
-    int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
-    error_handler(dbRc);
-
-    // TODO: Add error handling for when the name is already used. Currently, the DB is populated with something that has no
-    // reference.
-
-    // freeSplitPath(&newPath);
+    // update its parent directory in database
+    write_to_db(cur_dir_id, &cur_dir, sizeof(fcb));
     return rc;
 }
 
@@ -854,21 +796,19 @@ static int myfs_utimens(const char *path, struct utimbuf *ubuf)
 {
     write_log("myfs_utimens(path=\"%s\")\n", path);
 
-    fcb fcb;
+    fcb cur_fcb;
     uuid_t fcb_id;
 
-    int rc = get_fcb_by_path(path, &fcb, &fcb_id, 0);
-
+    // read fcb information from path
+    int rc = get_fcb_by_path(path, &cur_fcb, &fcb_id, 0);
     if (rc != 0)
         return rc;
 
-    fcb.mtime = ubuf->modtime;
-    fcb.atime = ubuf->actime;
+    // set up times
+    cur_fcb.mtime = ubuf->modtime;
+    cur_fcb.atime = ubuf->actime;
 
-    rc = unqlite_kv_store(pDb, fcb_id, KEY_SIZE, &fcb, sizeof(fcb));
-
-    error_handler(rc);
-
+    write_to_db(fcb_id, &cur_fcb, sizeof(fcb));
     return 0;
 }
 
