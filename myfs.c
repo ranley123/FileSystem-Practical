@@ -1,4 +1,3 @@
-
 #define FUSE_USE_VERSION 26
 
 #include <fuse.h>
@@ -68,6 +67,74 @@ void write_to_db(uuid_t id, void *data, size_t size)
     error_handler(rc);
 }
 
+uuid_t *get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t *next_block_id)
+{
+    if (iterator->level != 0)
+        return NULL;
+    if (iterator->create && uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0)
+    {
+        uuid_generate(*next_block_id);
+        char *empty_block = calloc(sizeof(char), block_size);
+        write_to_db(*next_block_id, empty_block, block_size);
+        free(empty_block);
+        uuid_copy(iterator->fcb->data_blocks[iterator->index], *next_block_id);
+    }
+    else
+        uuid_copy(*next_block_id, iterator->fcb->data_blocks[iterator->index]);
+
+    iterator->index += 1;
+    if (iterator->index >= NUMBER_DIRECT_BLOCKS)
+    {
+        iterator->index = 0;
+        iterator->level += 1;
+    }
+    return next_block_id;
+}
+
+uuid_t *get_next_indirect_block(fcb_iterator *iterator, size_t block_size, uuid_t *next_block_id)
+{
+    if (iterator->level == 1 || iterator->index >= MAX_UUIDS_PER_BLOCK)
+        return NULL;
+
+    uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}};
+    if (uuid_compare(iterator->fcb->indirectBlock, zero_uuid) == 0)
+    {
+        if (iterator->create)
+        {
+            uuid_generate(iterator->fcb->indirectBlock);
+            int rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
+            error_handler(rc);
+        }
+        else
+        {
+            return NULL;
+        }
+    }
+    unqlite_int64 nBytes = MAX_UUIDS_PER_BLOCK * sizeof(uuid_t);
+    int rc = unqlite_kv_fetch(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, &nBytes);
+    error_handler(rc);
+
+    if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
+    {
+        uuid_generate(next_block_id);
+        char *empty_block = calloc(sizeof(char), block_size);
+        rc = unqlite_kv_store(pDb, next_block_id, KEY_SIZE, empty_block, block_size);
+        free(empty_block);
+        error_handler(rc);
+        uuid_copy(blocks[iterator->index], next_block_id);
+
+        rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, MAX_UUIDS_PER_BLOCK * sizeof(uuid_t));
+        error_handler(rc);
+    }
+    else
+    {
+        uuid_copy(next_block_id, blocks[iterator->index]);
+    }
+
+    iterator->index += 1;
+    return next_block_id;
+}
+
 /**
  * Get the next block from a given FCB block iterator
  * @param [in]  iterator    - The iterator to retrieve the next block from
@@ -76,7 +143,7 @@ void write_to_db(uuid_t id, void *data, size_t size)
  * @param [out] blockUUID   - If not NULL, gets filled in with the uuid of the retrieved block
  * @return The pointer passed in from block, or NULL if there are no more blocks to retrieve
  */
-void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize, uuid_t *blockUUID)
+void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size, uuid_t *block_id)
 {
     uuid_t next_block_id = {0};
 
@@ -87,68 +154,14 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize,
     {
     case 0:
     {
-        if (iterator->create && uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0)
-        {
-            uuid_generate(next_block_id);
-            char *empty_block = calloc(sizeof(char), blockSize);
-            int rc = unqlite_kv_store(pDb, next_block_id, KEY_SIZE, empty_block, (ssize_t)blockSize);
-            free(empty_block);
-            error_handler(rc);
-            uuid_copy(iterator->fcb->data_blocks[iterator->index], next_block_id);
-        }
-        else
-        {
-            uuid_copy(next_block_id, iterator->fcb->data_blocks[iterator->index]);
-        }
-
-        iterator->index += 1;
-        if (iterator->index >= NUMBER_DIRECT_BLOCKS)
-        {
-            iterator->index = 0;
-            iterator->level += 1;
-        }
+        if (get_next_direct_block(iterator, block_size, &next_block_id) == NULL)
+            return NULL;
     }
     break;
     case 1:
     {
-        if (iterator->index >= MAX_UUIDS_PER_BLOCK)
+        if (get_next_indirect_block(iterator, block_size, &next_block_id))
             return NULL;
-        uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}};
-        if (uuid_compare(iterator->fcb->indirectBlock, zero_uuid) == 0)
-        {
-            if (iterator->create)
-            {
-                uuid_generate(iterator->fcb->indirectBlock);
-                int rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
-                error_handler(rc);
-            }
-            else
-            {
-                return NULL;
-            }
-        }
-        unqlite_int64 nBytes = MAX_UUIDS_PER_BLOCK * sizeof(uuid_t);
-        int rc = unqlite_kv_fetch(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, &nBytes);
-        error_handler(rc);
-
-        if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
-        {
-            uuid_generate(next_block_id);
-            char *empty_block = calloc(sizeof(char), blockSize);
-            rc = unqlite_kv_store(pDb, next_block_id, KEY_SIZE, empty_block, (ssize_t)blockSize);
-            free(empty_block);
-            error_handler(rc);
-            uuid_copy(blocks[iterator->index], next_block_id);
-
-            rc = unqlite_kv_store(pDb, iterator->fcb->indirectBlock, KEY_SIZE, *blocks, MAX_UUIDS_PER_BLOCK * sizeof(uuid_t));
-            error_handler(rc);
-        }
-        else
-        {
-            uuid_copy(next_block_id, blocks[iterator->index]);
-        }
-
-        iterator->index += 1;
     }
     break;
     default:
@@ -158,15 +171,10 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize,
     if (uuid_compare(next_block_id, zero_uuid) == 0)
         return NULL;
 
-    if (blockUUID != NULL)
-    {
-        uuid_copy(*blockUUID, next_block_id);
-    }
+    if (block_id != NULL)
+        uuid_copy(*block_id, next_block_id);
 
-    unqlite_int64 nBytes = (unqlite_int64)blockSize;
-    int rc = unqlite_kv_fetch(pDb, next_block_id, KEY_SIZE, block, &nBytes);
-    error_handler(rc);
-
+    read_from_db(next_block_id, block, block_size);
     return block;
 }
 
