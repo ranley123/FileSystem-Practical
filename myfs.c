@@ -145,20 +145,20 @@ uuid_t *get_next_indirect_block(fcb_iterator *iterator, size_t block_size, uuid_
  */
 void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size, uuid_t *block_id)
 {
-    uuid_t next_block_id = {0};
+    uuid_t next_block_id = {0}; // a temporary variable to store
 
     if (iterator->level > MAX_INDEX_LEVEL)
         return NULL;
 
     switch (iterator->level)
     {
-    case 0:
+    case 0: // level is 0: we are iterating over direct blocks
     {
         if (get_next_direct_block(iterator, block_size, &next_block_id) == NULL)
             return NULL;
     }
     break;
-    case 1:
+    case 1: // level is 1: we are iterating over blocks in indirect block
     {
         if (get_next_indirect_block(iterator, block_size, &next_block_id))
             return NULL;
@@ -168,12 +168,15 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
         return NULL;
     }
 
+    // if no valid next block id is retrieved
     if (uuid_compare(next_block_id, zero_uuid) == 0)
         return NULL;
 
+    // when block_id is NULL, it means users do not want this information
     if (block_id != NULL)
         uuid_copy(*block_id, next_block_id);
 
+    // retrieve the next block to return
     read_from_db(next_block_id, block, block_size);
     return block;
 }
@@ -185,10 +188,7 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
  */
 static int get_root_fcb(fcb *root_fcb)
 {
-
-    unqlite_int64 nBytes = sizeof(fcb);
-    int rc = unqlite_kv_fetch(pDb, ROOT_OBJECT_KEY, KEY_SIZE, root_fcb, &nBytes);
-    error_handler(rc);
+    read_from_db(ROOT_OBJECT_KEY, root_fcb, sizeof(fcb));
     return 0;
 }
 
@@ -237,12 +237,6 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
     {
         if (parent_dir_data.used_entries == MAX_DIRECTORY_ENTRIES_PER_BLOCK)
             continue;
-
-        // for (int index = 0; index < DIRECTORY_ENTRIES_PER_BLOCK; index++)
-        // {
-        //     if (strcmp(parent_dir_data.entries[index].name, name) == 0)
-        //         return -EEXIST; // file already exists
-        // }
 
         for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
         {
@@ -1109,47 +1103,32 @@ static int myfs_mkdir(const char *path, mode_t mode)
 {
     write_log("myfs_mkdir(path=\"%s\", mode=0%03o)\n", path, mode);
 
-    // SplitPath newPath = splitPath(path);
     char *path_copy = strdup(path);
     char *filename = basename(path_copy);
 
     if (strlen(filename) >= MAX_FILENAME_LENGTH)
-    {
-        // freeSplitPath(&newPath);
         return -ENAMETOOLONG;
-    }
 
     fcb currentDir;
     uuid_t parentFCBUUID;
     int rc = get_fcb_by_path(path, &currentDir, &parentFCBUUID, 1);
 
     if (rc != 0)
-    {
-        // freeSplitPath(&newPath);
         return rc;
-    }
 
     fcb newDirectory;
-    make_new_fcb(&newDirectory, mode, 1);
-
     uuid_t newDirectoryRef = {0};
-
+    make_new_fcb(&newDirectory, mode, 1);
     uuid_generate(newDirectoryRef);
 
     rc = unqlite_kv_store(pDb, newDirectoryRef, KEY_SIZE, &newDirectory, sizeof newDirectory);
-
     error_handler(rc);
 
     rc = add_fcb_to_dir(&currentDir, filename, newDirectoryRef);
 
-    // In case new blocks were added.
     int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
     error_handler(dbRc);
 
-    // TODO: Add error handling for when the name is already used. Currently, the DB is populated with something that has no
-    // reference.
-
-    // freeSplitPath(&newPath);
     return rc;
 }
 
