@@ -182,31 +182,31 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize,
  * @param [in]  path - The path to split
  * @return A SplitPath object containing the 2 parts of the path
  */
-static SplitPath splitPath(const char *path)
-{
-    char *basenameCopy = strdup(path);
-    char *dirnameCopy = strdup(path);
+// static SplitPath splitPath(const char *path)
+// {
+//     char *basenameCopy = strdup(path);
+//     char *dirnameCopy = strdup(path);
 
-    char *bn = basename(basenameCopy);
-    char *dn = dirname(dirnameCopy);
+//     char *bn = basename(basenameCopy);
+//     char *dn = dirname(dirnameCopy);
 
-    SplitPath result = {
-        .parent = dn,
-        .name = bn,
-        .savedPtrs = {dirnameCopy, basenameCopy}};
+//     SplitPath result = {
+//         .parent = dn,
+//         .name = bn,
+//         .savedPtrs = {dirnameCopy, basenameCopy}};
 
-    return result;
-}
+//     return result;
+// }
 
-/**
- * Free the pointers of a split path.
- * @param [in]  path - The SplitPath object to be freed
- */
-static void freeSplitPath(SplitPath *path)
-{
-    free(path->savedPtrs[0]);
-    free(path->savedPtrs[1]);
-}
+// /**
+//  * Free the pointers of a split path.
+//  * @param [in]  path - The SplitPath object to be freed
+//  */
+// static void freeSplitPath(SplitPath *path)
+// {
+//     free(path->savedPtrs[0]);
+//     free(path->savedPtrs[1]);
+// }
 
 /**
  * Fetch the root file control block from the database
@@ -302,7 +302,7 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
  * @param [out] uuidToFill  - If not NULL, this is filled in with the reference to the retrieved node
  * @return 0 if successful, < 0 if an error happened.
  */
-static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill, uuid_t *uuidToFill)
+static int get_fcb_from_dir(const fcb *dirBlock, const char *name, fcb *toFill, uuid_t *uuidToFill)
 {
     if (strlen(name) >= MAX_FILENAME_LENGTH)
         return -ENAMETOOLONG;
@@ -355,33 +355,37 @@ static int getFCBInDirectory(const fcb *dirBlock, const char *name, fcb *toFill,
  */
 static int get_fcb_by_path(const char *path, fcb *toFill, uuid_t *uuidToFill, int get_parent)
 {
+    write_log("get fcb by path \n");
+    char *path_copy = strdup(path);
+    char *path_remaining;
 
-    char *pathCopy = strdup(path);
+    // if parent fcb wanted, remove the base name
+    if(get_parent){
+        path_copy = dirname(path_copy);
+    }
 
-    char *savePtr;
-
-    char *p = strtok_r(pathCopy, "/", &savePtr);
+    char *cur_name = strtok_r(path_copy, "/", &path_remaining);
 
     if (uuidToFill != NULL)
     {
         uuid_copy(*uuidToFill, ROOT_OBJECT_KEY);
     }
-    fcb currentDir;
-    get_root_fcb(&currentDir);
+    fcb parent_dir;
+    get_root_fcb(&parent_dir);
 
-    while (p != NULL)
+    while (cur_name != NULL)
     {
 
-        int rc = getFCBInDirectory(&currentDir, p, &currentDir, uuidToFill);
+        int rc = get_fcb_from_dir(&parent_dir, cur_name, &parent_dir, uuidToFill);
         if (rc != 0)
             return rc;
 
-        p = strtok_r(NULL, "/", &savePtr);
+        cur_name = strtok_r(NULL, "/", &path_remaining);
     }
 
-    free(pathCopy);
+    free(path_copy);
 
-    memcpy(toFill, &currentDir, sizeof currentDir);
+    memcpy(toFill, &parent_dir, sizeof(fcb));
 
     return 0;
 }
@@ -794,24 +798,26 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     write_log("myfs_create(path=\"%s\", mode=0%03o, fi=0x%08x)\n", path, mode, fi);
 
-    SplitPath newPath = splitPath(path);
+    // SplitPath newPath = splitPath(path);
+    char *path_copy = strdup(path);
+    char *filename = basename(path_copy);
 
-    if (strlen(newPath.name) >= MAX_FILENAME_LENGTH)
+    if (strlen(filename) >= MAX_FILENAME_LENGTH)
     {
-        freeSplitPath(&newPath);
+        // freeSplitPath(&newPath);
         return -ENAMETOOLONG;
     }
 
     fcb currentDir;
 
     uuid_t parentFCBUUID;
-    int rc = get_fcb_by_path(newPath.parent, &currentDir, &parentFCBUUID, 1);
+    int rc = get_fcb_by_path(path, &currentDir, &parentFCBUUID, 1);
 
-    if (rc != 0)
-    {
-        freeSplitPath(&newPath);
-        return rc;
-    }
+    // if (rc != 0)
+    // {
+    //     freeSplitPath(&newPath);
+    //     return rc;
+    // }
 
     fcb newFCB;
 
@@ -825,7 +831,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 
     error_handler(rc);
 
-    rc = add_fcb_to_dir(&currentDir, newPath.name, newFileRef);
+    rc = add_fcb_to_dir(&currentDir, filename, newFileRef);
 
     // In case new blocks were added.
     int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
@@ -834,7 +840,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     // TODO: Add error handling for when the name is already used. Currently, the DB is populated with something that has no
     // reference.
 
-    freeSplitPath(&newPath);
+    // freeSplitPath(&newPath);
     return rc;
 }
 
@@ -1155,21 +1161,23 @@ static int myfs_mkdir(const char *path, mode_t mode)
 {
     write_log("myfs_mkdir(path=\"%s\", mode=0%03o)\n", path, mode);
 
-    SplitPath newPath = splitPath(path);
+    // SplitPath newPath = splitPath(path);
+    char *path_copy = strdup(path);
+    char *filename = basename(path_copy);
 
-    if (strlen(newPath.name) >= MAX_FILENAME_LENGTH)
+    if (strlen(filename) >= MAX_FILENAME_LENGTH)
     {
-        freeSplitPath(&newPath);
+        // freeSplitPath(&newPath);
         return -ENAMETOOLONG;
     }
 
     fcb currentDir;
     uuid_t parentFCBUUID;
-    int rc = get_fcb_by_path(newPath.parent, &currentDir, &parentFCBUUID, 1);
+    int rc = get_fcb_by_path(path, &currentDir, &parentFCBUUID, 1);
 
     if (rc != 0)
     {
-        freeSplitPath(&newPath);
+        // freeSplitPath(&newPath);
         return rc;
     }
 
@@ -1184,7 +1192,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
 
     error_handler(rc);
 
-    rc = add_fcb_to_dir(&currentDir, newPath.name, newDirectoryRef);
+    rc = add_fcb_to_dir(&currentDir, filename, newDirectoryRef);
 
     // In case new blocks were added.
     int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
@@ -1193,7 +1201,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
     // TODO: Add error handling for when the name is already used. Currently, the DB is populated with something that has no
     // reference.
 
-    freeSplitPath(&newPath);
+    // freeSplitPath(&newPath);
     return rc;
 }
 
@@ -1206,21 +1214,22 @@ static int myfs_unlink(const char *path)
 {
     write_log("myfs_unlink(path=\"%s\")\n", path);
 
-    SplitPath pathToRemove = splitPath(path);
-
+    // SplitPath pathToRemove = splitPath(path);
+    char *path_copy = strdup(path);
+    char *filename = basename(path_copy);
     fcb parentDir;
 
-    int rc = get_fcb_by_path(pathToRemove.parent, &parentDir, NULL, 1);
+    int rc = get_fcb_by_path(path, &parentDir, NULL, 1);
 
     if (rc != 0)
     {
-        freeSplitPath(&pathToRemove);
+        // freeSplitPath(&pathToRemove);
         return rc;
     }
 
-    rc = removeFileFCBinDirectory(&parentDir, pathToRemove.name);
+    rc = removeFileFCBinDirectory(&parentDir, filename);
 
-    freeSplitPath(&pathToRemove);
+    // freeSplitPath(&pathToRemove);
 
     return rc;
 }
@@ -1234,21 +1243,23 @@ static int myfs_rmdir(const char *path)
 {
     write_log("myfs_rmdir(path=\"%s\")\n", path);
 
-    SplitPath pathToRemove = splitPath(path);
+    // SplitPath pathToRemove = splitPath(path);
+    char *path_copy = strdup(path);
+    char *filename = basename(path_copy);
 
     fcb parentDir;
 
-    int rc = get_fcb_by_path(pathToRemove.parent, &parentDir, NULL, 1);
+    int rc = get_fcb_by_path(path, &parentDir, NULL, 1);
 
     if (rc != 0)
     {
-        freeSplitPath(&pathToRemove);
+        // freeSplitPath(&pathToRemove);
         return rc;
     }
 
-    rc = removeDirectoryFCBinDirectory(&parentDir, pathToRemove.name);
+    rc = removeDirectoryFCBinDirectory(&parentDir, filename);
 
-    freeSplitPath(&pathToRemove);
+    // freeSplitPath(&pathToRemove);
     return rc;
 }
 
