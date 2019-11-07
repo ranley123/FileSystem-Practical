@@ -39,6 +39,31 @@ fcb_iterator make_iterator(fcb *fcb, int create)
 }
 
 /**
+ * @param id 	- Given the id, retrieve
+ * @param data 	- where returning results will be put into
+ * @param size 	- expected size of fetched results
+ */
+void read_from_db(uuid_t id, void *data, size_t size)
+{
+	int rc;
+	unqlite_int64 nBytes = size;
+
+	// check if correct results found
+	rc = unqlite_kv_fetch(pDb, id, KEY_SIZE, NULL, &nBytes);
+	error_handler(rc);
+
+	// check if we retrieved the correct thing with correct size
+	if (nBytes != size)
+	{
+		write_log("fetch: Unexpected size. Expected %d, current %d\n", size, nBytes);
+		exit(-1);
+	}
+
+	// retrieve the fcb
+	unqlite_kv_fetch(pDb, id, KEY_SIZE, data, &nBytes);
+}
+
+/**
  * Get the next block from a given FCB block iterator
  * @param [in]  iterator    - The iterator to retrieve the next block from
  * @param [out] block       - The data block to fill in with the retrieved block
@@ -140,7 +165,6 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t blockSize,
     return block;
 }
 
-
 /**
  * Split a path into it's filename and parent directory
  * @param [in]  path - The path to split
@@ -172,17 +196,16 @@ static void freeSplitPath(SplitPath *path)
     free(path->savedPtrs[1]);
 }
 
-
 /**
  * Fetch the root file control block from the database
  * @param [out] rootBlock - The block to be filled in with the root FCB
  * @return 0 if successful, <0 if an error happened.
  */
-static int fetchRootFCB(fcb *rootBlock)
+static int get_root_fcb(fcb *root_fcb)
 {
 
     unqlite_int64 nBytes = sizeof(fcb);
-    int rc = unqlite_kv_fetch(pDb, ROOT_OBJECT_KEY, KEY_SIZE, rootBlock, &nBytes);
+    int rc = unqlite_kv_fetch(pDb, ROOT_OBJECT_KEY, KEY_SIZE, root_fcb, &nBytes);
     error_handler(rc);
     return 0;
 }
@@ -192,30 +215,14 @@ static int fetchRootFCB(fcb *rootBlock)
  * @param [out] blockToFill - The block to initialize
  * @param [in]  mode        - The mode of the newly created node
  */
-static void createDirectoryNode(fcb *cur_fcb, mode_t mode)
+static void make_new_fcb(fcb *cur_fcb, mode_t mode, int dir)
 {
     memset(cur_fcb, 0, sizeof(fcb));
-    cur_fcb->mode = S_IFDIR | mode;
-
-    time_t now = time(NULL);
-    cur_fcb->atime = now;
-    cur_fcb->mtime = now;
-    cur_fcb->ctime = now;
-
-    cur_fcb->uid = getuid();
-    cur_fcb->gid = getgid();
-}
-
-/**
- * Initialize a FCB to be a new empty file
- * @param [out] blockToFill - The block to initialize
- * @param [in]  mode        - The mode of the newly created node
- */
-static void createFileNode(fcb *cur_fcb, mode_t mode)
-{
-    memset(cur_fcb, 0, sizeof(fcb));
-    cur_fcb->mode = S_IFREG | mode;
-
+    if(dir)
+        cur_fcb->mode = S_IFDIR | mode;
+    else
+        cur_fcb->mode = S_IFREG | mode;
+    
     time_t now = time(NULL);
     cur_fcb->atime = now;
     cur_fcb->mtime = now;
@@ -232,52 +239,45 @@ static void createFileNode(fcb *cur_fcb, mode_t mode)
  * @param [in]      fcb_ref  - The uuid reference to the node to link to
  * @return 0 if successful, < 0 if an error happened.
  */
-static int addFCBToDirectory(fcb *dirBlock, const char *name, const uuid_t fcb_ref)
+static int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
 {
     if (strlen(name) >= MAX_FILENAME_LENGTH)
         return -ENAMETOOLONG;
 
-    if (S_ISDIR(dirBlock->mode))
+    if (!S_ISDIR(parent_dir_fcb->mode))
+        return -ENOTDIR;
+    fcb_iterator iterator = make_iterator(parent_dir_fcb, 1);
+    dir_data entries;
+
+    uuid_t blockUUID;
+
+    while (get_next_data_block(&iterator, &entries, sizeof(entries), &blockUUID) != NULL)
     {
-        fcb_iterator iter = make_iterator(dirBlock, 1);
-        dir_data entries;
+        if (entries.used_entries == DIRECTORY_ENTRIES_PER_BLOCK)
+            continue;
 
-        uuid_t blockUUID;
-
-        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+        for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
         {
-            if (entries.used_entries == DIRECTORY_ENTRIES_PER_BLOCK)
-            {
-                continue;
-            }
-
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
-            {
-                if (strcmp(entries.entries[i].name, name) == 0)
-                {
-                    return -EEXIST;
-                }
-            }
-
-            for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
-            {
-                if (strcmp(entries.entries[i].name, "") == 0)
-                {
-                    strcpy(entries.entries[i].name, name);
-                    uuid_copy(entries.entries[i].fcb_id, fcb_ref);
-
-                    entries.used_entries += 1;
-                    int rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
-                    error_handler(rc);
-                    return 0;
-                }
-            }
+            if (strcmp(entries.entries[i].name, name) == 0)
+                return -EEXIST; // file already exists
         }
 
-        return -ENOSPC;
+        for (int i = 0; i < DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+        {
+            if (strcmp(entries.entries[i].name, "") == 0)
+            {
+                strcpy(entries.entries[i].name, name);
+                uuid_copy(entries.entries[i].fcb_id, fcb_id);
+
+                entries.used_entries += 1;
+                int rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
+                error_handler(rc);
+                return 0;
+            }
+        }
     }
 
-    return -ENOTDIR;
+    return -ENOSPC;
 }
 
 /**
@@ -353,7 +353,7 @@ static int getFCBAtPath(const char *path, fcb *toFill, uuid_t *uuidToFill)
         uuid_copy(*uuidToFill, ROOT_OBJECT_KEY);
     }
     fcb currentDir;
-    fetchRootFCB(&currentDir);
+    get_root_fcb(&currentDir);
 
     while (p != NULL)
     {
@@ -600,7 +600,7 @@ static void init_fs()
         perror("Root of filesystem not found. Creating it...\n");
         fcb rootDirectory;
 
-        createDirectoryNode(&rootDirectory, DEFAULT_DIR_MODE);
+        make_new_fcb(&rootDirectory, DEFAULT_DIR_MODE, 1);
 
         rc = unqlite_kv_store(pDb, ROOT_OBJECT_KEY, KEY_SIZE, &rootDirectory, sizeof rootDirectory);
 
@@ -640,11 +640,11 @@ static int myfs_getattr(const char *path, struct stat *stbuf)
     if (rc != 0)
         return rc;
 
-    stbuf->st_mode = currentDirectory.mode;            /* File mode.  */
-    stbuf->st_nlink = 2;                               /* Link count.  */
-    stbuf->st_uid = currentDirectory.uid;          /* User ID of the file's owner.  */
-    stbuf->st_gid = currentDirectory.gid;         /* Group ID of the file's group. */
-    stbuf->st_size = currentDirectory.size;            /* Size of file, in bytes.  */
+    stbuf->st_mode = currentDirectory.mode;   /* File mode.  */
+    stbuf->st_nlink = 2;                      /* Link count.  */
+    stbuf->st_uid = currentDirectory.uid;     /* User ID of the file's owner.  */
+    stbuf->st_gid = currentDirectory.gid;     /* Group ID of the file's group. */
+    stbuf->st_size = currentDirectory.size;   /* Size of file, in bytes.  */
     stbuf->st_atime = currentDirectory.atime; /* Time of last access.  */
     stbuf->st_mtime = currentDirectory.mtime; /* Time of last modification.  */
     stbuf->st_ctime = currentDirectory.ctime; /* Time of last status change.  */
@@ -801,7 +801,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 
     fcb newFCB;
 
-    createFileNode(&newFCB, mode);
+    make_new_fcb(&newFCB, mode, 0);
 
     uuid_t newFileRef = {0};
 
@@ -811,7 +811,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 
     error_handler(rc);
 
-    rc = addFCBToDirectory(&currentDir, newPath.name, newFileRef);
+    rc = add_fcb_to_dir(&currentDir, newPath.name, newFileRef);
 
     // In case new blocks were added.
     int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
@@ -1160,7 +1160,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
     }
 
     fcb newDirectory;
-    createDirectoryNode(&newDirectory, mode);
+    make_new_fcb(&newDirectory, mode, 1);
 
     uuid_t newDirectoryRef = {0};
 
@@ -1170,7 +1170,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
 
     error_handler(rc);
 
-    rc = addFCBToDirectory(&currentDir, newPath.name, newDirectoryRef);
+    rc = add_fcb_to_dir(&currentDir, newPath.name, newDirectoryRef);
 
     // In case new blocks were added.
     int dbRc = unqlite_kv_store(pDb, parentFCBUUID, KEY_SIZE, &currentDir, sizeof(currentDir));
@@ -1313,7 +1313,7 @@ static int myfs_rename(const char *from, const char *to)
             }
         }
 
-        rc = addFCBToDirectory(targetParentFCBPtr, toPath.name, sourceUUID);
+        rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
         if (rc != 0)
         {
             freeSplitPath(&fromPath);
@@ -1323,7 +1323,7 @@ static int myfs_rename(const char *from, const char *to)
     }
     else if (rc == -ENOENT)
     {
-        rc = addFCBToDirectory(targetParentFCBPtr, toPath.name, sourceUUID);
+        rc = add_fcb_to_dir(targetParentFCBPtr, toPath.name, sourceUUID);
         if (rc != 0)
         {
             freeSplitPath(&fromPath);
