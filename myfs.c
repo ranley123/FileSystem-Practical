@@ -1048,18 +1048,18 @@ static int myfs_chmod(const char *path, mode_t mode)
 {
     write_log("myfs_chmod(path=\"%s\", mode=0%03o)\n", path, mode);
 
-    fcb block;
-    uuid_t blockUUID;
-    int rc = get_fcb_by_path(path, &block, &blockUUID, 0);
+    fcb cur_fcb;
+    uuid_t cur_fcb_id;
 
+    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
     if (rc != 0)
         return rc;
 
-    block.mode |= mode;
+    // update mode
+    cur_fcb.mode |= mode;
 
-    rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &block, sizeof(block));
-
-    error_handler(rc);
+    // update the fcb in the database
+    write_to_db(cur_fcb_id, &cur_fcb, sizeof(fcb));
 
     return 0;
 }
@@ -1075,20 +1075,19 @@ static int myfs_chown(const char *path, uid_t uid, gid_t gid)
 {
     write_log("myfs_chown(path=\"%s\", uid=%d, gid=%d)\n", path, uid, gid);
 
-    fcb block;
-    uuid_t blockUUID;
+    fcb cur_fcb;
+    uuid_t cur_fcb_id;
 
-    int rc = get_fcb_by_path(path, &block, &blockUUID, 0);
-
+    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
     if (rc != 0)
         return rc;
 
-    block.uid = uid;
-    block.gid = gid;
+    // update uid and gid
+    cur_fcb.uid = uid;
+    cur_fcb.gid = gid;
 
-    rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &block, sizeof(block));
-
-    error_handler(rc);
+    // update the fcb in the database
+    write_to_db(cur_fcb_id, &cur_fcb, sizeof(fcb));
 
     return 0;
 }
@@ -1172,23 +1171,17 @@ static int myfs_rmdir(const char *path)
 {
     write_log("myfs_rmdir(path=\"%s\")\n", path);
 
-    // SplitPath pathToRemove = splitPath(path);
+    fcb parent_dir;
     char *path_copy = strdup(path);
     char *filename = basename(path_copy);
 
-    fcb parentDir;
-
-    int rc = get_fcb_by_path(path, &parentDir, NULL, 1);
-
+    // get fcb of parent directory
+    int rc = get_fcb_by_path(path, &parent_dir, NULL, 1);
     if (rc != 0)
-    {
-        // freeSplitPath(&pathToRemove);
         return rc;
-    }
 
-    rc = removeDirectoryFCBinDirectory(&parentDir, filename);
+    rc = removeDirectoryFCBinDirectory(&parent_dir, filename);
 
-    // freeSplitPath(&pathToRemove);
     return rc;
 }
 
