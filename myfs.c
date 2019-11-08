@@ -35,6 +35,7 @@ fcb_iterator make_iterator(fcb *fcb, int create)
  */
 void read_from_db(uuid_t id, void *data, size_t size)
 {
+    write_log("read %d \n", id);
     int rc;
     unqlite_int64 nBytes = size;
 
@@ -61,6 +62,7 @@ void read_from_db(uuid_t id, void *data, size_t size)
  */
 void write_to_db(uuid_t id, void *data, size_t size)
 {
+    write_log("Write Size: %d \n", size);
     int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
     error_handler(rc);
 }
@@ -70,13 +72,14 @@ void write_to_db(uuid_t id, void *data, size_t size)
  */
 void delete_from_db(uuid_t id)
 {
+    write_log("delete %d \n", id);
     int rc = unqlite_kv_delete(pDb, id, KEY_SIZE);
     error_handler(rc);
 }
 
 void create_empty_block(fcb_iterator *iterator, uuid_t *block_id, size_t block_size)
 {
-    uuid_generate(*block_id);                         // generate a new uuid
+    uuid_generate(*block_id);                              // generate a new uuid
     char *empty_block = malloc(sizeof(char) * block_size); // create a new empty block
 
     write_to_db(*block_id, empty_block, sizeof(char) * block_size); // write the new block to database
@@ -306,7 +309,7 @@ int get_fcb_from_dir(const fcb *parent_dir, const char *name, fcb *cur_fcb, uuid
  */
 int get_fcb_by_path(const char *path, fcb *cur_fcb, uuid_t *cur_fcb_id, int get_parent)
 {
-    write_log("get fcb by path \n");
+    // write_log("get fcb by path \n");
     char *path_copy = strdup(path);
     char *path_remaining;
 
@@ -356,10 +359,10 @@ int dir_is_empty(const fcb *cur_dir)
     while (get_next_data_block(&iterator, &cur_dir_data, sizeof(dir_data), &cur_dir_data_id) != NULL)
     {
         if (cur_dir_data.used_entries > 0) // indicates non-empty dir
-            return 1;
+            return 0;
     }
 
-    return 0;
+    return 1;
 }
 
 /**
@@ -368,59 +371,54 @@ int dir_is_empty(const fcb *cur_dir)
  */
 void delete_fcb_data(fcb *cur_fcb)
 {
+    write_log("begin to delete data! \n");
     uuid_t data_block_id;        // the id of the current data block
-    char data_block[BLOCK_SIZE]; // the content of the current data block
+    dir_data data_block; // the content of the current data block
     fcb_iterator iter = make_iterator(cur_fcb, 0);
 
-    while (get_next_data_block(&iter, data_block, BLOCK_SIZE, &data_block_id))
+    while (get_next_data_block(&iter, &data_block, sizeof(dir_data), &data_block_id))
         delete_from_db(data_block_id); // delete them in database
 }
 
-// /**
-//  * Remove the link from a directory, without deleting the node it points to
-//  * @param [in,out]  dirBlock - The block from which to remove the link
-//  * @param [in]      name     - The name of the link to remove
-//  * @return 0 if successful, < 0 if an error happened.
-//  */
-// static int unlinkLinkInDirectory(const fcb *dirBlock, const char *name)
-// {
-//     if (strlen(name) >= MAX_FILENAME_LENGTH)
-//         return -ENAMETOOLONG;
-
-//     if (dirBlock->mode & S_IFDIR)
-//     {
-//         fcb_iterator iter = make_iterator(dirBlock, 0);
-//         dir_data entries;
-
-//         uuid_t blockUUID;
-
-//         while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
-//         {
-//             for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
-//             {
-//                 if (strcmp(entries.entries[i].name, name) == 0)
-//                 {
-//                     memset(&entries.entries[i], 0, sizeof(entries.entries[i]));
-//                     entries.used_entries -= 1;
-//                     int rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
-//                     error_handler(rc);
-
-//                     return 0;
-//                 }
-//             }
-//         }
-//         return -ENOENT;
-//     }
-//     return -ENOTDIR;
-// }
-
 /**
- * Remove a file from a directory. This both unlinks the file and deletes the node the link pointed to.
- * @param [in,out]  dirBlock - The directory node that should have the file removed
- * @param [in]      name     - The name of the file to be removed
+ * Remove the link from a directory, without deleting the node it points to
+ * @param [in,out]  dirBlock - The block from which to remove the link
+ * @param [in]      name     - The name of the link to remove
  * @return 0 if successful, < 0 if an error happened.
  */
-int delete_file_fcb_from_dir(fcb *parent_dir, const char *name)
+static int unlinkLinkInDirectory(const fcb *dirBlock, const char *name)
+{
+    // if (strlen(name) >= MAX_FILENAME_LENGTH)
+    //     return -ENAMETOOLONG;
+
+    // if (dirBlock->mode & S_IFDIR)
+    // {
+    //     fcb_iterator iter = make_iterator(dirBlock, 0);
+    //     dir_data entries;
+
+    //     uuid_t blockUUID;
+
+    //     while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
+    //     {
+    //         for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+    //         {
+    //             if (strcmp(entries.entries[i].name, name) == 0)
+    //             {
+    //                 memset(&entries.entries[i], 0, sizeof(entries.entries[i]));
+    //                 entries.used_entries -= 1;
+    //                 int rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
+    //                 error_handler(rc);
+
+    //                 return 0;
+    //             }
+    //         }
+    //     }
+    //     return -ENOENT;
+    // }
+    return -ENOTDIR;
+}
+
+int delete_file_or_dir_from_dir(fcb *parent_dir, const char *name, int is_dir)
 {
     if (!S_ISDIR(parent_dir->mode))
         return -ENOTDIR;
@@ -432,7 +430,7 @@ int delete_file_fcb_from_dir(fcb *parent_dir, const char *name)
     while (get_next_data_block(&iterator, &parent_dir_data, sizeof(dir_data), &parent_dir_data_id) != NULL)
     {
         for (int index = 0; index < MAX_DIRECTORY_ENTRIES_PER_BLOCK; index++)
-        {   // if we find the matching filename
+        { // if we find the matching filename
             if (strcmp(parent_dir_data.entries[index].name, name) == 0)
             {
                 fcb cur_fcb;
@@ -440,11 +438,22 @@ int delete_file_fcb_from_dir(fcb *parent_dir, const char *name)
                 uuid_copy(fcb_id, parent_dir_data.entries[index].fcb_id);
                 read_from_db(fcb_id, &cur_fcb, sizeof(fcb)); // read fcb content
 
-                if (!S_ISREG(cur_fcb.mode))
-                    return -EISDIR;
+                if (is_dir) // delete a dir
+                {
+                    if (!S_ISDIR(cur_fcb.mode))
+                        return -ENOTDIR;
+                    int empty_dir = dir_is_empty(&cur_fcb);
+                    if (empty_dir == 0)
+                        return -ENOTEMPTY;
+                }
+                else
+                { // delete a file
+                    if (!S_ISREG(cur_fcb.mode))
+                        return -EISDIR;
+                }
 
                 delete_fcb_data(&cur_fcb); // delete the fcb data blocks
-                delete_from_db(fcb_id); // delete fcb itself
+                delete_from_db(fcb_id);    // delete fcb itself
 
                 // update parent dir
                 memset(&parent_dir_data.entries[index], 0, sizeof(dir_entry));
@@ -458,73 +467,6 @@ int delete_file_fcb_from_dir(fcb *parent_dir, const char *name)
         }
     }
     return -ENOENT;
-}
-
-/**
- * Remove a directory from a directory. This both unlinks the directory and deletes the node the link pointed to.
- * @param [in,out]  dirBlock - The directory node that should have the directory removed
- * @param [in]      name     - The name of the directory to be removed
- * @return 0 if successful, < 0 if an error happened.
- */
-static int removeDirectoryFCBinDirectory(const fcb *dirBlock, const char *name)
-{
-    if (strlen(name) >= MAX_FILENAME_LENGTH)
-        return -ENAMETOOLONG;
-
-    if (dirBlock->mode & S_IFDIR)
-    {
-        fcb_iterator iter = make_iterator(dirBlock, 0);
-        dir_data entries;
-
-        uuid_t blockUUID;
-
-        while (get_next_data_block(&iter, &entries, sizeof(entries), &blockUUID) != NULL)
-        {
-            for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
-            {
-                if (strcmp(entries.entries[i].name, name) == 0)
-                {
-                    uuid_t fcb_uuid;
-                    fcb fcb;
-                    memcpy(&fcb_uuid, entries.entries[i].fcb_id, sizeof(uuid_t));
-
-                    unqlite_int64 bytesRead = sizeof(fcb);
-
-                    int rc = unqlite_kv_fetch(pDb, fcb_uuid, KEY_SIZE, &fcb, &bytesRead);
-                    error_handler(rc);
-
-                    if (S_ISDIR(fcb.mode))
-                    {
-
-                        int empty_dir = dir_is_empty(&fcb);
-
-                        if (empty_dir != 0)
-                        {
-                            return -ENOTEMPTY;
-                        }
-
-                        delete_fcb_data(&fcb);
-                        unqlite_kv_delete(pDb, fcb_uuid, KEY_SIZE);
-
-                        memset(&entries.entries[i], 0, sizeof(entries.entries[i]));
-
-                        entries.used_entries -= 1;
-                        rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &entries, sizeof entries);
-                        error_handler(rc);
-
-                        return 0;
-                    }
-                    else
-                    {
-                        return -ENOTDIR;
-                    }
-                }
-            }
-        }
-
-        return -ENOENT;
-    }
-    return -ENOTDIR;
 }
 
 /**
@@ -1069,7 +1011,7 @@ static int myfs_unlink(const char *path)
     if (rc != 0)
         return rc;
 
-    rc = delete_file_fcb_from_dir(&parent_dir, filename);
+    rc = delete_file_or_dir_from_dir(&parent_dir, filename, 0);
 
     return rc;
 }
@@ -1092,7 +1034,7 @@ static int myfs_rmdir(const char *path)
     if (rc != 0)
         return rc;
 
-    rc = removeDirectoryFCBinDirectory(&parent_dir, filename);
+    rc = delete_file_or_dir_from_dir(&parent_dir, filename, 1);
 
     return rc;
 }
