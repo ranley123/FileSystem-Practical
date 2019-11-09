@@ -18,41 +18,45 @@
 
 #define MAX_FILE_SIZE (BLOCK_SIZE * NUMBER_DIRECT_BLOCKS + BLOCK_SIZE * MAX_UUIDS_PER_BLOCK)
 
-const mode_t DEFAULT_FILE_MODE = S_IFREG|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH;
+const mode_t DEFAULT_FILE_MODE = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
 
-const mode_t DEFAULT_DIR_MODE = S_IFDIR|S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH;
+const mode_t DEFAULT_DIR_MODE = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 
-#define max(x, y) (x > y? x: y)
-#define min(x, y) (x > y? y: x)
+#define max(x, y) (x > y ? x : y)
+#define min(x, y) (x > y ? y : x)
 
-typedef struct _fcb {
-    mode_t          mode; // file mode              
-    uid_t           uid; // user id                      
-    gid_t           gid; // group id                      
-    off_t           size; // file size
+typedef struct _fcb
+{
+    mode_t mode; // file mode
+    uid_t uid;   // user id
+    gid_t gid;   // group id
+    off_t size;  // file size
 
-    uuid_t          data_blocks[NUMBER_DIRECT_BLOCKS]; // ids of direct blocks
-    uuid_t          indirectBlock; // id of indirect data block
+    uuid_t data_blocks[NUMBER_DIRECT_BLOCKS]; // ids of direct blocks
+    uuid_t indirect_data_block;               // id of indirect data block
 
     time_t atime; // time of last access
     time_t mtime; // time of last modification
     time_t ctime; // time of last change to status
 } fcb;
 
-typedef struct _dir_entry {
-    uuid_t fcb_id; // id of fcb
+typedef struct _dir_entry
+{
+    uuid_t fcb_id;                  // id of fcb
     char name[MAX_FILENAME_LENGTH]; // filename
 } dir_entry;
 
 #define MAX_DIRECTORY_ENTRIES_PER_BLOCK (BLOCK_SIZE / sizeof(dir_entry))
 
-typedef struct _dir_data {
-    int used_entries; // used entries                                
-    dir_entry entries[MAX_DIRECTORY_ENTRIES_PER_BLOCK]; 
+typedef struct _dir_data
+{
+    int used_entries; // used entries
+    dir_entry entries[MAX_DIRECTORY_ENTRIES_PER_BLOCK];
 } dir_data;
 
-typedef struct _file_data {
-    int size; // current size
+typedef struct _file_data
+{
+    int size;              // current size
     char data[BLOCK_SIZE]; // data
 } file_data;
 
@@ -67,7 +71,7 @@ typedef struct
 // We need to use a well-known value as a key for the root object.
 const uuid_t ROOT_OBJECT_KEY = "root";
 
-// This is the size of a regular key used to fetch things from the 
+// This is the size of a regular key used to fetch things from the
 // database. We use uuids as keys, so 16 bytes each
 #define KEY_SIZE sizeof(uuid_t)
 
@@ -81,17 +85,18 @@ extern unqlite *pDb;
 extern void error_handler(int);
 void print_id(uuid_t *);
 
-extern FILE* init_log_file();
+extern FILE *init_log_file();
 extern void write_log(const char *, ...);
 
 extern uuid_t zero_uuid;
 
 // We can use the fs_state struct to pass information to fuse, which our handler functions can
 // then access. In this case, we use it to pass a file handle for the file used for logging
-struct myfs_state {
+struct myfs_state
+{
     FILE *logfile;
 };
-#define NEWFS_PRIVATE_DATA ((struct myfs_state *) fuse_get_context()->private_data)
+#define NEWFS_PRIVATE_DATA ((struct myfs_state *)fuse_get_context()->private_data)
 
 // Some helper functions for logging etc.
 
@@ -103,12 +108,14 @@ struct myfs_state {
 FILE *logfile;
 
 // Open a file for writing so we can obtain a handle
-FILE *init_log_file(){
+FILE *init_log_file()
+{
     //Open logfile.
     logfile = fopen("myfs.log", "w");
-    if (logfile == NULL) {
-		perror("Unable to open log file. Life is not worth living.");
-		exit(EXIT_FAILURE);
+    if (logfile == NULL)
+    {
+        perror("Unable to open log file. Life is not worth living.");
+        exit(EXIT_FAILURE);
     }
     //Use line buffering
     setvbuf(logfile, NULL, _IOLBF, 0);
@@ -116,33 +123,40 @@ FILE *init_log_file(){
 }
 
 // Write to the provided handle
-void write_log(const char *format, ...){
+void write_log(const char *format, ...)
+{
     va_list ap;
     va_start(ap, format);
     vfprintf(NEWFS_PRIVATE_DATA->logfile, format, ap);
 }
 
 // Simple error handler which cleans up and quits
-void error_handler(int rc){
-	if( rc != UNQLITE_OK ){
-		const char *zBuf;
-		int iLen;
-		unqlite_config(pDb,UNQLITE_CONFIG_ERR_LOG,&zBuf,&iLen);
-		if( iLen > 0 ){
-			perror("error_handler: ");
-			perror(zBuf);
-		}
-		if( rc != UNQLITE_BUSY && rc != UNQLITE_NOTIMPLEMENTED ){
-			/* Rollback */
-			unqlite_rollback(pDb);
-		}
-		exit(rc);
-	}
+void error_handler(int rc)
+{
+    if (rc != UNQLITE_OK)
+    {
+        const char *zBuf;
+        int iLen;
+        unqlite_config(pDb, UNQLITE_CONFIG_ERR_LOG, &zBuf, &iLen);
+        if (iLen > 0)
+        {
+            perror("error_handler: ");
+            perror(zBuf);
+        }
+        if (rc != UNQLITE_BUSY && rc != UNQLITE_NOTIMPLEMENTED)
+        {
+            /* Rollback */
+            unqlite_rollback(pDb);
+        }
+        exit(rc);
+    }
 }
 
-void print_id(uuid_t *id){
- 	size_t i; 
-    for (i = 0; i < sizeof *id; i ++) {
+void print_id(uuid_t *id)
+{
+    size_t i;
+    for (i = 0; i < sizeof *id; i++)
+    {
         printf("%02x ", (*id)[i]);
     }
 }
