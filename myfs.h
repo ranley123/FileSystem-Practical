@@ -10,7 +10,7 @@
 #include <fuse.h>
 
 #define MAX_FILENAME_LENGTH 256
-#define BLOCK_SIZE 4096 // 4 pages
+#define BLOCK_SIZE 300 // 4 pages
 #define MAX_UUIDS_PER_BLOCK (BLOCK_SIZE / sizeof(uuid_t))
 
 #define NUMBER_DIRECT_BLOCKS 12
