@@ -38,6 +38,8 @@ typedef struct _fcb
     time_t atime; // time of last access
     time_t mtime; // time of last modification
     time_t ctime; // time of last change to status
+
+    nlink_t count;
 } fcb;
 
 typedef struct _dir_entry
