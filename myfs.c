@@ -88,14 +88,13 @@ int get_root_fcb(fcb *root_fcb)
     return 0;
 }
 
-void create_empty_block(fcb_iterator *iterator, uuid_t *block_id, size_t block_size)
+void create_empty_data_block(uuid_t *block_id, size_t block_size)
 {
     uuid_generate(*block_id);                              // generate a new uuid
     char *empty_block = malloc(sizeof(char) * block_size); // create a new empty block
-
+    memset(empty_block, 0, sizeof(block_size));
     write_to_db(*block_id, empty_block, sizeof(char) * block_size); // write the new block to database
     free(empty_block);
-    uuid_copy(iterator->fcb->data_blocks[iterator->index], *block_id); // update the new id
 }
 
 uuid_t *get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t *next_block_id)
@@ -106,12 +105,13 @@ uuid_t *get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t 
     // if meeting an unused block and create-enabled, then an empty block is created and written to database
     if (uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0 && iterator->create == 1)
     {
-        create_empty_block(iterator, next_block_id, block_size);
+        create_empty_data_block(next_block_id, block_size);
+        uuid_copy(iterator->fcb->data_blocks[iterator->index], *next_block_id); // update the new id
     }
     else // if meeting a used block, directly update the next_block_id
         uuid_copy(*next_block_id, iterator->fcb->data_blocks[iterator->index]);
 
-    iterator->index++; // iindex increments
+    iterator->index++; // index increments
     if (iterator->index >= NUMBER_DIRECT_BLOCKS)
     { // need to move to next level: indirect
         iterator->level += 1;
@@ -143,7 +143,8 @@ uuid_t *get_next_indirect_block(fcb_iterator *iterator, size_t block_size, uuid_
 
     if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
     {
-        create_empty_block(iterator, next_block_id, block_size);
+        create_empty_data_block(next_block_id, block_size);
+        uuid_copy(blocks[iterator->index], *next_block_id);
         write_to_db(iterator->fcb->indirect_data_block, *blocks, nBytes);
     }
     else
@@ -168,23 +169,18 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
     if (iterator->level > MAX_INDEX_LEVEL)
         return NULL;
 
-    switch (iterator->level)
-    {
-    case 0: // level is 0: we are iterating over direct blocks
+    if (iterator->level == 0) // level is 0: we are iterating over direct blocks
     {
         if (get_next_direct_block(iterator, block_size, &next_block_id) == NULL)
             return NULL;
     }
-    break;
-    case 1: // level is 1: we are iterating over blocks in indirect block
+    else if (iterator->level == 1) // level is 1: we are iterating over blocks in indirect block
     {
-        if (get_next_indirect_block(iterator, block_size, &next_block_id))
+        if (get_next_indirect_block(iterator, block_size, &next_block_id) == NULL)
             return NULL;
     }
-    break;
-    default:
+    else
         return NULL;
-    }
 
     // if no valid next block id is retrieved
     if (uuid_compare(next_block_id, zero_uuid) == 0)
@@ -374,8 +370,8 @@ void delete_fcb_data(fcb *cur_fcb, int is_dir)
 {
     write_log("begin to delete data! \n");
     uuid_t data_block_id; // the id of the current data block
-    int size = (is_dir == 1? sizeof(dir_data) : sizeof(file_data));
-    char data_block[size];  // the content of the current data block
+    int size = (is_dir == 1 ? sizeof(dir_data) : sizeof(file_data));
+    char data_block[size]; // the content of the current data block
     fcb_iterator iter = make_iterator(cur_fcb, 0);
 
     while (get_next_data_block(&iter, &data_block, size, &data_block_id))
@@ -455,10 +451,11 @@ int delete_file_or_dir_from_dir(fcb *parent_dir, const char *name, int is_dir)
                 }
 
                 delete_fcb_data(&cur_fcb, is_dir); // delete the fcb data blocks
-                delete_from_db(fcb_id);    // delete fcb itself
+                delete_from_db(fcb_id);            // delete fcb itself
 
                 // update parent dir
-                memset(&parent_dir_data.entries[index], 0, sizeof(dir_entry));
+                memset(&parent_dir_data.entries[index].fcb_id, 0, sizeof(uuid_t));
+                memset(&parent_dir_data.entries[index].name, 0, MAX_FILENAME_LENGTH);
                 parent_dir_data.used_entries -= 1;
 
                 // update parent dir in database
@@ -546,16 +543,16 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
  * @param [in]  size    - The number of bytes to be read
  * @return 0 if successful, < 0 if an error happened.
  */
-int read_block(char *dest, file_data *block, off_t offset, size_t size)
+int read_block(char *dest, file_data *src, off_t offset, size_t size)
 {
     int start = offset;
-    int end = min(start + size, block->size);
+    int end = min(start + size, src->size);
 
-    if (start >= block->size)
+    if (start >= src->size)
         return -1;
 
     int bytes_read = end - start;
-    memcpy(dest, &block->data[offset], bytes_read);
+    memcpy(dest, &src->data[offset], bytes_read);
     return bytes_read;
 }
 
@@ -690,7 +687,6 @@ int write_block(file_data *dest, const char *buf, off_t offset, size_t size)
     dest->size = start + bytes_written;
 
     return bytes_written;
-    
 }
 
 /**
@@ -704,56 +700,136 @@ int write_block(file_data *dest, const char *buf, off_t offset, size_t size)
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     write_log("myfs_write(path=\"%s\", size=%d, offset=%lld,)\n", path, size, offset);
-
-    fcb fcb;
-    uuid_t fileUUID;
-    int rc = get_fcb_by_path(path, &fcb, &fileUUID, 0);
-
-    if (rc != 0)
-        return rc;
     if (size == 0)
         return 0;
 
-    off_t savedOffset = offset;
+    fcb cur_fcb;
+    uuid_t cur_fcb_id;
+    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
+    if (rc != 0)
+        return rc;
+    if (!S_ISREG(cur_fcb.mode))
+        return -EISDIR;
 
-    int bytesWritten = 0;
-    if (S_ISREG(fcb.mode))
+    int bytes_written = 0;
+    off_t remaining_offset = offset;
+    uuid_t cur_data_block_id;
+    file_data cur_data_block;
+    fcb_iterator iterator = make_iterator(&cur_fcb, 1);
+
+    while (get_next_data_block(&iterator, &cur_data_block, sizeof(file_data), &cur_data_block_id) != NULL)
     {
-        uuid_t blockUUID;
-        file_data dataBlock;
-        fcb_iterator iter = make_iterator(&fcb, 1);
-
-        while (get_next_data_block(&iter, &dataBlock, sizeof(dataBlock), &blockUUID))
+        int cur_bytes_written = write_block(&cur_data_block, &buf[bytes_written], offset, size);
+        if (cur_bytes_written == -1)
         {
-            int bW = write_block(&dataBlock, &buf[bytesWritten], offset, size);
-            write_log("bytes written: %d \n", bW);
-            if (bW == -1)
-            {
-                offset -= BLOCK_SIZE;
-            }
-            else
-            {
-                rc = unqlite_kv_store(pDb, blockUUID, KEY_SIZE, &dataBlock, sizeof(dataBlock));
-                error_handler(rc);
-                write_to_db(blockUUID, &dataBlock, sizeof(dataBlock));
-                offset = max(0, offset - bW);
-                size -= bW;
-                bytesWritten += bW;
-            }
-            if (size == 0)
-                break;
+            offset -= BLOCK_SIZE;
         }
+        else
+        {
+            write_to_db(cur_data_block_id, &cur_data_block, sizeof(file_data));
+            offset = max(0, offset - cur_bytes_written);
+            size -= cur_bytes_written;
+            bytes_written += cur_bytes_written;
+        }
+        if (size == 0)
+            break;
+    }
 
-        fcb.size = max(fcb.size, savedOffset + bytesWritten);
+    cur_fcb.size = max(cur_fcb.size, remaining_offset + bytes_written);
+    write_to_db(cur_fcb_id, &cur_fcb, sizeof(fcb));
 
-        rc = unqlite_kv_store(pDb, fileUUID, KEY_SIZE, &fcb, sizeof(fcb));
-        error_handler(rc);
+    return bytes_written;
+}
 
-        return bytesWritten;
+void truncate_direct_level(fcb *cur_fcb, off_t *remaining_size)
+{
+    for (int index = 0; index < NUMBER_DIRECT_BLOCKS; index++)
+    {
+        if (*remaining_size != 0)
+        {
+            if (uuid_compare(cur_fcb->data_blocks[index], zero_uuid) == 0)
+            { // if new size > current size, then create an empty block
+                uuid_t new_block_id = {0};
+                file_data new_data_block;
+
+                new_data_block.size = (int)min(*remaining_size, BLOCK_SIZE);
+                *remaining_size -= new_data_block.size;
+                write_to_db(new_block_id, &new_data_block, sizeof(file_data));
+                uuid_copy(cur_fcb->data_blocks[index], new_block_id);
+            }
+        }
+        else
+        { // new size < current size, so delete the following used data blocks
+            if (uuid_compare(cur_fcb->data_blocks[index], zero_uuid) != 0)
+            {
+                delete_from_db(cur_fcb->data_blocks[index]);
+                memset(&cur_fcb->data_blocks[index], 0, KEY_SIZE);
+            }
+        }
+    }
+}
+
+void truncate_indirect_level(fcb *cur_fcb, off_t *remaining_size)
+{
+    if (remaining_size == 0)
+    {
+        if (uuid_compare(cur_fcb->indirect_data_block, zero_uuid) != 0)
+        {
+            uuid_t blocks[MAX_UUIDS_PER_BLOCK];
+            read_from_db(cur_fcb->indirect_data_block, blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
+
+            for (int index = 0; index < MAX_UUIDS_PER_BLOCK; index++)
+            {
+                if (uuid_compare(blocks[index], zero_uuid) != 0)
+                {
+                    delete_from_db(blocks[index]);
+                    memset(&blocks[index], 0, KEY_SIZE);
+                }
+            }
+        }
+        delete_from_db(cur_fcb->indirect_data_block);
+        memset(cur_fcb->indirect_data_block, 0, KEY_SIZE);
     }
     else
     {
-        return -EISDIR;
+        uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}};
+
+        if (uuid_compare(cur_fcb->indirect_data_block, zero_uuid) == 0)
+        {
+            uuid_t indirect_block_id = {0};
+            create_empty_data_block(indirect_block_id, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
+            uuid_copy(cur_fcb->indirect_data_block, indirect_block_id);
+        }
+
+        read_from_db(cur_fcb->indirect_data_block, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
+
+        for (int index = 0; index < MAX_UUIDS_PER_BLOCK; index++)
+        {
+            if (remaining_size == 0)
+            {
+                if (uuid_compare(blocks[index], zero_uuid) != 0)
+                {
+                    delete_from_db(blocks[index]);
+                    memset(&blocks[index], 0, KEY_SIZE);
+                }
+            }
+            else
+            {
+                if (uuid_compare(blocks[index], zero_uuid) == 0)
+                {
+                    uuid_t new_block_id = {0};
+                    file_data new_block;
+                    uuid_generate(new_block_id);
+
+                    new_block.size = (int)min(remaining_size, BLOCK_SIZE);
+                    remaining_size -= new_block.size;
+
+                    write_to_db(new_block_id, &new_block, sizeof(file_data));
+                    uuid_copy(blocks[index], new_block_id);
+                }
+            }
+        }
+        write_to_db(cur_fcb->indirect_data_block, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
     }
 }
 
@@ -763,132 +839,25 @@ static int myfs_write(const char *path, const char *buf, size_t size, off_t offs
  * @param [in] newSize  - The new size of the file
  * @return 0 if successful, < 0 if an error happened.
  */
-static int myfs_truncate(const char *path, off_t newSize)
+static int myfs_truncate(const char *path, off_t new_size)
 {
-    write_log("myfs_truncate(path=\"%s\", newSize=%lld)\n", path, newSize);
-
-    off_t remainingSize = newSize;
-
-    if (newSize > MAX_FILE_SIZE)
-    {
+    write_log("myfs_truncate(path=\"%s\", new_size=%lld)\n", path, new_size);
+    if (new_size > MAX_FILE_SIZE)
         return -EFBIG;
-    }
 
-    uuid_t fileUUID;
-    fcb fileToResize;
-
-    int rc = get_fcb_by_path(path, &fileToResize, &fileUUID, 0);
-
+    off_t remaining_size = new_size;
+    uuid_t cur_fcb_id;
+    fcb cur_fcb;
+    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
     if (rc != 0)
         return rc;
 
-    for (int blockIdx = 0; blockIdx < NUMBER_DIRECT_BLOCKS; ++blockIdx)
-    {
-        if (remainingSize == 0)
-        {
-            if (uuid_compare(fileToResize.data_blocks[blockIdx], zero_uuid) != 0)
-            {
-                unqlite_kv_delete(pDb, fileToResize.data_blocks[blockIdx], KEY_SIZE);
-                memset(&fileToResize.data_blocks[blockIdx], 0, KEY_SIZE);
-            }
-        }
-        else
-        {
-            if (uuid_compare(fileToResize.data_blocks[blockIdx], zero_uuid) == 0)
-            {
-                uuid_t newBlockUUID = {0};
-                uuid_generate(newBlockUUID);
+    truncate_direct_level(&cur_fcb, &remaining_size);
+    truncate_indirect_level(&cur_fcb, &remaining_size);
 
-                file_data block = emptyFile;
-                block.size = (int)min(remainingSize, BLOCK_SIZE);
-                remainingSize -= block.size;
-
-                rc = unqlite_kv_store(pDb, newBlockUUID, KEY_SIZE, &block, sizeof(block));
-                error_handler(rc);
-
-                uuid_copy(fileToResize.data_blocks[blockIdx], newBlockUUID);
-            }
-        }
-    }
-
-    // Handle first level of indirection
-    if (remainingSize == 0)
-    {
-        if (uuid_compare(fileToResize.indirect_data_block, zero_uuid) != 0)
-        {
-            uuid_t blocks[MAX_UUIDS_PER_BLOCK];
-            unqlite_int64 nBytes = sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK;
-            rc = unqlite_kv_fetch(pDb, fileToResize.indirect_data_block, KEY_SIZE, &blocks, &nBytes);
-            error_handler(rc);
-
-            for (int blockIdx = 0; blockIdx < MAX_UUIDS_PER_BLOCK; ++blockIdx)
-            {
-                if (uuid_compare(blocks[blockIdx], zero_uuid) != 0)
-                {
-                    unqlite_kv_delete(pDb, blocks[blockIdx], KEY_SIZE);
-                    memset(&blocks[blockIdx], 0, KEY_SIZE);
-                }
-            }
-        }
-        unqlite_kv_delete(pDb, fileToResize.indirect_data_block, KEY_SIZE);
-        memset(fileToResize.indirect_data_block, 0, KEY_SIZE);
-    }
-    else
-    {
-        uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}};
-        if (uuid_compare(fileToResize.indirect_data_block, zero_uuid) == 0)
-        {
-            uuid_t indirectBlockUUID = {0};
-            uuid_generate(indirectBlockUUID);
-
-            rc = unqlite_kv_store(pDb, indirectBlockUUID, KEY_SIZE, &blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
-            error_handler(rc);
-
-            uuid_copy(fileToResize.indirect_data_block, indirectBlockUUID);
-        }
-
-        unqlite_int64 nBytes = sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK;
-        rc = unqlite_kv_fetch(pDb, fileToResize.indirect_data_block, KEY_SIZE, &blocks, &nBytes);
-        error_handler(rc);
-
-        for (int blockIdx = 0; blockIdx < MAX_UUIDS_PER_BLOCK; ++blockIdx)
-        {
-            if (remainingSize == 0)
-            {
-                if (uuid_compare(blocks[blockIdx], zero_uuid) != 0)
-                {
-                    unqlite_kv_delete(pDb, blocks[blockIdx], KEY_SIZE);
-                    memset(&blocks[blockIdx], 0, KEY_SIZE);
-                }
-            }
-            else
-            {
-                if (uuid_compare(blocks[blockIdx], zero_uuid) == 0)
-                {
-                    uuid_t newBlockUUID = {0};
-                    uuid_generate(newBlockUUID);
-
-                    file_data block = emptyFile;
-                    block.size = (int)min(remainingSize, BLOCK_SIZE);
-                    remainingSize -= block.size;
-
-                    rc = unqlite_kv_store(pDb, newBlockUUID, KEY_SIZE, &block, sizeof(block));
-                    error_handler(rc);
-
-                    uuid_copy(blocks[blockIdx], newBlockUUID);
-                }
-            }
-        }
-        rc = unqlite_kv_store(pDb, fileToResize.indirect_data_block, KEY_SIZE, &blocks, sizeof(blocks));
-        error_handler(rc);
-    }
-
-    fileToResize.size = newSize;
-
-    unqlite_int64 nBytes = sizeof(fileToResize);
-    rc = unqlite_kv_store(pDb, fileUUID, KEY_SIZE, &fileToResize, nBytes);
-
-    error_handler(rc);
+    // update the cur fcb in database
+    cur_fcb.size = new_size;
+    write_to_db(cur_fcb_id, &cur_fcb, sizeof(fcb));
 
     return 0;
 }
@@ -1152,9 +1121,6 @@ static int myfs_rename(const char *from, const char *to)
     // return 0;
 }
 
-// This struct contains pointers to all the functions defined above
-// It is used to pass the function pointers to fuse
-// fuse will then execute the methods as required
 static struct fuse_operations myfs_oper = {
     .getattr = myfs_getattr,
     .readdir = myfs_readdir,
