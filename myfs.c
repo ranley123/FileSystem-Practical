@@ -643,14 +643,14 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 }
 
 /**
- * Update the times (actime, modtime) for a file.
+ * Update the modtime for a file.
  * @param path - the path of the file which needs to be modified
  * @param ubuf - the target timestamps
  * @return 0 on success, < 0 on failure
  */
-static int myfs_utimens(const char *path, struct utimbuf *ubuf)
+static int myfs_utime(const char *path, struct utimbuf *ubuf)
 {
-    write_log("myfs_utimens(path=\"%s\")\n", path);
+    write_log("myfs_utime(path=\"%s\")\n", path);
 
     uuid_t fcb_id;
     fcb cur_fcb;
@@ -658,11 +658,7 @@ static int myfs_utimens(const char *path, struct utimbuf *ubuf)
     int rc = get_fcb_by_path(path, &fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
-
-    // set up times
     cur_fcb.mtime = ubuf->modtime;
-    cur_fcb.atime = ubuf->actime;
-
     write_to_db(fcb_id, &cur_fcb, sizeof(fcb));
     return 0;
 }
@@ -1057,7 +1053,7 @@ static struct fuse_operations myfs_oper = {
     .rmdir = myfs_rmdir,
     .read = myfs_read,
     .create = myfs_create,
-    .utimens = myfs_utimens,
+    .utime = myfs_utime,
     .write = myfs_write,
     .truncate = myfs_truncate,
     .unlink = myfs_unlink,
