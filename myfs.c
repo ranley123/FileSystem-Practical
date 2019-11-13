@@ -9,6 +9,56 @@ unqlite *pDb;
 uuid_t zero_uuid;
 
 /**
+ * @param id 	- Given the id, retrieve
+ * @param data 	- where returning results will be put into
+ * @param size 	- expected size of fetched results
+ */
+void read_from_db(const uuid_t id, void *data, size_t size)
+{
+    write_log("read %d \n", id);
+    int rc;
+    unqlite_int64 nBytes = size;
+
+    // check if correct results found
+    rc = unqlite_kv_fetch(pDb, id, KEY_SIZE, NULL, &nBytes);
+    error_handler(rc);
+
+    // check if we retrieved the correct thing with correct size
+    if (nBytes != size)
+    {
+        write_log("fetch: Unexpected size. Expected %d, current %d\n", size, nBytes);
+        exit(-1);
+    }
+
+    // retrieve the fcb
+    unqlite_kv_fetch(pDb, id, KEY_SIZE, data, &nBytes);
+}
+
+/**
+ * Write fcb back to the database
+ * @param id 	- Given the id, store
+ * @param data 	- data to be put into the database
+ * @param size 	- size of data
+ */
+void write_to_db(const uuid_t id, void *data, size_t size)
+{
+    write_log("Write Size: %d \n", size);
+    int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
+    error_handler(rc);
+}
+
+/**
+ * Delete item in database based on the id
+ * @param id - the key 
+ */
+void delete_from_db(const uuid_t id)
+{
+    write_log("delete %d \n", id);
+    int rc = unqlite_kv_delete(pDb, id, KEY_SIZE);
+    error_handler(rc);
+}
+
+/**
  * Make a new fcb for dir or file
  * @param cur_fcb - where to store the new fcb
  * @param mode      - the mode
@@ -38,12 +88,12 @@ void make_new_fcb(fcb *cur_fcb, mode_t mode, int is_dir)
  * @param block_id - id to be filled with the new data block
  * @param block_size - the size of the new data block
  */
-void make_empty_data_block(uuid_t *block_id, size_t block_size)
+void make_empty_data_block(uuid_t block_id, size_t block_size)
 {
-    uuid_generate(*block_id);                              // generate a new uuid
+    uuid_generate(block_id);                              // generate a new uuid
     char *empty_block = malloc(sizeof(char) * block_size); // create a new empty block
     memset(empty_block, 0, sizeof(block_size));
-    write_to_db(*block_id, empty_block, sizeof(char) * block_size); // write the new block to database
+    write_to_db(block_id, empty_block, sizeof(char) * block_size); // write the new block to database
     free(empty_block);
 }
 
@@ -65,56 +115,6 @@ fcb_iterator make_iterator(fcb *fcb, int create)
 }
 
 /**
- * @param id 	- Given the id, retrieve
- * @param data 	- where returning results will be put into
- * @param size 	- expected size of fetched results
- */
-void read_from_db(uuid_t id, void *data, size_t size)
-{
-    write_log("read %d \n", id);
-    int rc;
-    unqlite_int64 nBytes = size;
-
-    // check if correct results found
-    rc = unqlite_kv_fetch(pDb, id, KEY_SIZE, NULL, &nBytes);
-    error_handler(rc);
-
-    // check if we retrieved the correct thing with correct size
-    if (nBytes != size)
-    {
-        write_log("fetch: Unexpected size. Expected %d, current %d\n", size, nBytes);
-        exit(-1);
-    }
-
-    // retrieve the fcb
-    unqlite_kv_fetch(pDb, id, KEY_SIZE, data, &nBytes);
-}
-
-/**
- * Write fcb back to the database
- * @param id 	- Given the id, store
- * @param data 	- data to be put into the database
- * @param size 	- size of data
- */
-void write_to_db(uuid_t id, void *data, size_t size)
-{
-    write_log("Write Size: %d \n", size);
-    int rc = unqlite_kv_store(pDb, id, KEY_SIZE, data, size);
-    error_handler(rc);
-}
-
-/**
- * Delete item in database based on the id
- * @param id - the key 
- */
-void delete_from_db(uuid_t id)
-{
-    write_log("delete %d \n", id);
-    int rc = unqlite_kv_delete(pDb, id, KEY_SIZE);
-    error_handler(rc);
-}
-
-/**
  * Get the root fcb
  * @param root_fcb - where stores the root fcb
  * @return 0 on success, < 0 on failure
@@ -130,29 +130,34 @@ int get_root_fcb(fcb *root_fcb)
  * @param iterator - the current iterator
  * @param block_size - the size of the data block for potential create_empty_data_block
  * @param next_block_id - filled by the next block id
- * @return next_block_id on success, NULL on failure
+ * @return 0 on success, < 0 on failure
  */
-uuid_t *get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t *next_block_id)
+int get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t next_block_id)
 {
     if (iterator->level != 0) // check the level
-        return NULL;
+        return -1;
 
-    // if meeting an unused block and create-enabled, then an empty block is created and written to database
-    if (uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0 && iterator->create == 1)
+    // if meeting an unused block
+    if (uuid_compare(iterator->fcb->data_blocks[iterator->index], zero_uuid) == 0)
     {
-        make_empty_data_block(next_block_id, block_size);
-        uuid_copy(iterator->fcb->data_blocks[iterator->index], *next_block_id); // update the new id
+        if (iterator->create)
+        { // creation allowed, creating an empty data block
+            make_empty_data_block(next_block_id, block_size);
+            uuid_copy(iterator->fcb->data_blocks[iterator->index], next_block_id); // update the new id
+        }
+        else // creation not allowed, indicating that iterating ends
+            return -1;
     }
     else // if meeting a used block, directly update the next_block_id
-        uuid_copy(*next_block_id, iterator->fcb->data_blocks[iterator->index]);
+        uuid_copy(next_block_id, iterator->fcb->data_blocks[iterator->index]);
 
     iterator->index++; // index increments
-    if (iterator->index >= NUMBER_DIRECT_BLOCKS)
+    if (iterator->index == NUMBER_DIRECT_BLOCKS)
     { // need to move to next level: indirect
         iterator->level += 1;
         iterator->index = 0;
     }
-    return next_block_id;
+    return 0;
 }
 
 /**
@@ -160,40 +165,40 @@ uuid_t *get_next_direct_block(fcb_iterator *iterator, size_t block_size, uuid_t 
  * @param iterator - the current iterator
  * @param block_size - the size of the data block for potential create_empty_data_block
  * @param next_block_id - filled by the next block id
- * @return next_block_id on success, NULL on failure
+ * @return 0 on success, < 0 on failure
  */
-uuid_t *get_next_indirect_block(fcb_iterator *iterator, size_t block_size, uuid_t *next_block_id)
+int get_next_indirect_block(fcb_iterator *iterator, size_t block_size, uuid_t next_block_id)
 {
     if (iterator->level != 1 || iterator->index >= MAX_UUIDS_PER_BLOCK)
-        return NULL;
+        return -1;
 
     uuid_t blocks[MAX_UUIDS_PER_BLOCK] = {{0}}; // the content of the indirect data block
+    unqlite_int64 blocks_size = sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK;
 
     if (uuid_compare(iterator->fcb->indirect_data_block, zero_uuid) == 0)
     {
         // if creating not allowed, then we already iterated to the end, so return NULL
         if (iterator->create == 0)
-            return NULL;
+            return -1;
         // otherwise, we generate a new indirect data block to hold many uuid_t
         uuid_generate(iterator->fcb->indirect_data_block);
-        write_to_db(iterator->fcb->indirect_data_block, *blocks, sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK);
+        write_to_db(iterator->fcb->indirect_data_block, *blocks, blocks_size);
     }
 
-    unqlite_int64 nBytes = sizeof(uuid_t) * MAX_UUIDS_PER_BLOCK;
     // read content of the indirect data block
-    read_from_db(iterator->fcb->indirect_data_block, *blocks, nBytes);
+    read_from_db(iterator->fcb->indirect_data_block, *blocks, blocks_size);
 
     if (iterator->create && uuid_compare(blocks[iterator->index], zero_uuid) == 0)
     {
         make_empty_data_block(next_block_id, block_size);
-        uuid_copy(blocks[iterator->index], *next_block_id);
-        write_to_db(iterator->fcb->indirect_data_block, *blocks, nBytes);
+        uuid_copy(blocks[iterator->index], next_block_id);
+        write_to_db(iterator->fcb->indirect_data_block, *blocks, blocks_size);
     }
     else
         uuid_copy(next_block_id, blocks[iterator->index]);
 
     iterator->index++;
-    return next_block_id;
+    return 0;
 }
 
 /**
@@ -213,12 +218,12 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
 
     if (iterator->level == 0) // level is 0: we are iterating over direct blocks
     {
-        if (get_next_direct_block(iterator, block_size, &next_block_id) == NULL)
+        if (get_next_direct_block(iterator, block_size, next_block_id) < 0)
             return NULL;
     }
     else if (iterator->level == 1) // level is 1: we are iterating over blocks in indirect block
     {
-        if (get_next_indirect_block(iterator, block_size, &next_block_id) == NULL)
+        if (get_next_indirect_block(iterator, block_size, next_block_id) < 0)
             return NULL;
     }
     else
@@ -228,9 +233,7 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
     if (uuid_compare(next_block_id, zero_uuid) == 0)
         return NULL;
 
-    // when block_id is NULL, it means users do not want this information
-    if (block_id != NULL)
-        uuid_copy(*block_id, next_block_id);
+    uuid_copy(*block_id, next_block_id);
 
     // retrieve the next block to return
     read_from_db(next_block_id, block, block_size);
@@ -245,7 +248,7 @@ void *get_next_data_block(fcb_iterator *iterator, void *block, size_t block_size
  * @param cur_fcb_id - where to store the id of fetched fcb. if NULL, then dont have to store
  * @return 0 on success, < 0 on failure
  */
-int get_fcb_from_dir(const fcb *parent_dir, const char *name, fcb *cur_fcb, uuid_t *cur_fcb_id)
+int get_fcb_from_dir(fcb *parent_dir, const char *name, uuid_t *cur_fcb_id, fcb *cur_fcb)
 {
     write_log("get fcb from dir \n");
     if (!S_ISDIR(parent_dir->mode))
@@ -262,10 +265,8 @@ int get_fcb_from_dir(const fcb *parent_dir, const char *name, fcb *cur_fcb, uuid
             if (strcmp(parent_dir_data.entries[index].name, name) == 0)
             { // retrieve the correct fcb
                 read_from_db(parent_dir_data.entries[index].fcb_id, cur_fcb, sizeof(fcb));
-
                 if (cur_fcb_id != NULL)
                     uuid_copy(*cur_fcb_id, parent_dir_data.entries[index].fcb_id);
-
                 return 0;
             }
         }
@@ -276,12 +277,12 @@ int get_fcb_from_dir(const fcb *parent_dir, const char *name, fcb *cur_fcb, uuid
 /**
  * Get the file control block of the node found at the given path
  * @param path - the path of the target fcb
- * @param cur_fcb - where to store the fetched fcb
  * @param cur_fcb_id - where to store the id of fetched fcb
+ * @param cur_fcb - where to store the fetched fcb
  * @param get_parent - 1 if we want to get the parent fcb, 0 for the base fcb
  * @return 0 on success, < 0 on failure
  */
-int get_fcb_by_path(const char *path, fcb *cur_fcb, uuid_t *cur_fcb_id, int get_parent)
+int get_fcb_by_path(const char *path, uuid_t *cur_fcb_id, fcb *cur_fcb, int get_parent)
 {
     write_log("get fcb by path \n");
     char *path_copy = strdup(path);
@@ -290,19 +291,17 @@ int get_fcb_by_path(const char *path, fcb *cur_fcb, uuid_t *cur_fcb_id, int get_
     // if parent fcb wanted, only keep the dir name
     if (get_parent)
         path_copy = dirname(path_copy);
-
     char *cur_name = strtok_r(path_copy, "/", &path_remaining);
-
-    if (cur_fcb_id != NULL)
-        uuid_copy(*cur_fcb_id, ROOT_OBJECT_KEY);
 
     // get the parent directory fcb from root
     fcb cur_dir;
     get_root_fcb(&cur_dir); // from root fcb to search
+    if (cur_fcb_id != NULL)
+        uuid_copy(*cur_fcb_id, ROOT_OBJECT_KEY);
 
     while (cur_name != NULL)
     {
-        int rc = get_fcb_from_dir(&cur_dir, cur_name, &cur_dir, cur_fcb_id);
+        int rc = get_fcb_from_dir(&cur_dir, cur_name, cur_fcb_id, &cur_dir);
         if (rc != 0)
             return rc;
 
@@ -336,18 +335,18 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
 
     while (get_next_data_block(&iterator, &parent_dir_data, sizeof(parent_dir_data), &data_block_id) != NULL)
     {
-        if (parent_dir_data.used_entries == MAX_DIRECTORY_ENTRIES_PER_BLOCK)
+        if (parent_dir_data.cur_len == MAX_DIRECTORY_ENTRIES_PER_BLOCK)
             continue;
 
-        for (int i = 0; i < MAX_DIRECTORY_ENTRIES_PER_BLOCK; ++i)
+        for (int index = 0; index < MAX_DIRECTORY_ENTRIES_PER_BLOCK; index++)
         {
-            if (strcmp(parent_dir_data.entries[i].name, "") == 0)
+            if (strcmp(parent_dir_data.entries[index].name, "") == 0)
             {
                 // set up the current empty entry
-                uuid_copy(parent_dir_data.entries[i].fcb_id, fcb_id);
-                strcpy(parent_dir_data.entries[i].name, name);
+                uuid_copy(parent_dir_data.entries[index].fcb_id, fcb_id);
+                strcpy(parent_dir_data.entries[index].name, name);
                 // update the used count
-                parent_dir_data.used_entries += 1;
+                parent_dir_data.cur_len += 1;
 
                 // update the parent dir data
                 write_to_db(data_block_id, &parent_dir_data, sizeof(dir_data));
@@ -355,7 +354,6 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
             }
         }
     }
-
     return -ENOSPC; // no extra space
 }
 
@@ -364,7 +362,7 @@ int add_fcb_to_dir(fcb *parent_dir_fcb, const char *name, const uuid_t fcb_id)
  * @param cur_dir - the dir to be checked
  * @return 1 on empty, 0 on not empty
  */
-int dir_is_empty(const fcb *cur_dir)
+int dir_is_empty(fcb *cur_dir)
 {
     if (!S_ISDIR(cur_dir->mode))
         return -ENOTDIR;
@@ -372,14 +370,12 @@ int dir_is_empty(const fcb *cur_dir)
     fcb_iterator iterator = make_iterator(cur_dir, 0);
     dir_data cur_dir_data;
     uuid_t cur_dir_data_id;
-    int number_of_children = 0;
 
     while (get_next_data_block(&iterator, &cur_dir_data, sizeof(dir_data), &cur_dir_data_id) != NULL)
     {
-        if (cur_dir_data.used_entries > 0) // indicates non-empty dir
+        if (cur_dir_data.cur_len > 0) // indicates non-empty dir
             return 0;
     }
-
     return 1;
 }
 
@@ -396,8 +392,8 @@ int delete_file_or_dir_from_dir(fcb *parent_dir, const char *name, int is_dir, i
         return -ENOTDIR;
 
     fcb_iterator iterator = make_iterator(parent_dir, 0);
-    dir_data parent_dir_data;
     uuid_t parent_dir_data_id;
+    dir_data parent_dir_data;
 
     while (get_next_data_block(&iterator, &parent_dir_data, sizeof(dir_data), &parent_dir_data_id) != NULL)
     {
@@ -446,7 +442,7 @@ int delete_file_or_dir_from_dir(fcb *parent_dir, const char *name, int is_dir, i
                 // update parent dir
                 memset(&parent_dir_data.entries[index].fcb_id, 0, sizeof(uuid_t));
                 memset(&parent_dir_data.entries[index].name, 0, MAX_FILENAME_LENGTH);
-                parent_dir_data.used_entries -= 1;
+                parent_dir_data.cur_len -= 1;
 
                 // update parent dir in database
                 write_to_db(parent_dir_data_id, &parent_dir_data, sizeof(dir_data));
@@ -469,11 +465,7 @@ int delete_file_or_dir_from_dir(fcb *parent_dir, const char *name, int is_dir, i
 int read_block(char *dest, file_data *src, off_t offset, size_t size)
 {
     int start = offset;
-    int end = min(start + size, src->size);
-
-    if (start >= src->size)
-        return -1;
-
+    int end = min(start + size, BLOCK_SIZE);
     int bytes_read = end - start;
     memcpy(dest, &src->data[offset], bytes_read);
     return bytes_read;
@@ -491,14 +483,9 @@ int write_block(file_data *dest, const char *src, off_t offset, size_t size)
 {
     int start = offset;
     int end = min(start + size, BLOCK_SIZE);
-
-    if (start >= BLOCK_SIZE)
-        return -1;
-
     int bytes_written = end - start;
     memcpy(&dest->data[start], src, bytes_written);
     dest->size = start + bytes_written;
-
     return bytes_written;
 }
 
@@ -513,13 +500,13 @@ static int myfs_getattr(const char *path, struct stat *stbuf)
     write_log("myfs_getattr(path=\"%s\")\n", path);
 
     fcb cur_dir;
-    int rc = get_fcb_by_path(path, &cur_dir, NULL, 0);
+    int rc = get_fcb_by_path(path, NULL, &cur_dir, 0);
 
     if (rc != 0)
         return rc;
 
     stbuf->st_mode = cur_dir.mode;   /* File mode.  */
-    stbuf->st_nlink = 1;             /* Link count.  */
+    stbuf->st_nlink = cur_dir.count; /* Link count.  */
     stbuf->st_uid = cur_dir.uid;     /* User ID of the file's owner.  */
     stbuf->st_gid = cur_dir.gid;     /* Group ID of the file's group. */
     stbuf->st_size = cur_dir.size;   /* Size of file, in bytes.  */
@@ -548,7 +535,7 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
     dir_data cur_dir_data;
     uuid_t cur_dir_data_id;
 
-    int rc = get_fcb_by_path(path, &cur_dir, NULL, 0);
+    int rc = get_fcb_by_path(path, NULL, &cur_dir, 0);
     if (rc != 0)
         return rc;
 
@@ -581,9 +568,11 @@ static int myfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 static int myfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     write_log("myfs_read(path=\"%s\", size=%zu, offset=%zu", path, size, offset);
+    if (size <= 0)
+        return -1;
 
     fcb cur_fcb;
-    int rc = get_fcb_by_path(path, &cur_fcb, NULL, 0);
+    int rc = get_fcb_by_path(path, NULL, &cur_fcb, 0);
     if (rc != 0)
         return rc;
     if (!S_ISREG(cur_fcb.mode))
@@ -592,21 +581,22 @@ static int myfs_read(const char *path, char *buf, size_t size, off_t offset, str
     unsigned bytes_read = 0;
     fcb_iterator iterator = make_iterator(&cur_fcb, 0);
     file_data file_data_block;
+    uuid_t file_data_id;
+    size_t remaining_size = size;
 
-    while (get_next_data_block(&iterator, &file_data_block, sizeof(file_data), NULL) != NULL)
+    while (get_next_data_block(&iterator, &file_data_block, sizeof(file_data), &file_data_id) != NULL)
     {
-        if (size == 0)
-            break;
-        off_t cur_bytes_read = read_block(&buf[bytes_read], &file_data_block, offset, size);
-
-        if (cur_bytes_read < 0)
-            offset -= BLOCK_SIZE; // move to the next block
-        else
+        if (remaining_size == 0)
+            return bytes_read;
+        if (offset >= BLOCK_SIZE)
         {
-            bytes_read += cur_bytes_read;
-            size -= cur_bytes_read;
-            offset = max(0, offset - cur_bytes_read);
+            offset -= BLOCK_SIZE;
+            continue;
         }
+        off_t cur_bytes_read = read_block(&buf[bytes_read], &file_data_block, offset, remaining_size);
+        remaining_size -= cur_bytes_read;
+        bytes_read += cur_bytes_read;
+        offset = max(0, offset - cur_bytes_read);
     }
 
     return bytes_read;
@@ -633,7 +623,7 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     if (strlen(filename) >= MAX_FILENAME_LENGTH)
         return -ENAMETOOLONG;
 
-    int rc = get_fcb_by_path(path, &cur_dir, &cur_dir_id, 1);
+    int rc = get_fcb_by_path(path, &cur_dir_id, &cur_dir, 1);
     if (rc != 0)
         return rc;
 
@@ -641,15 +631,14 @@ static int myfs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     make_new_fcb(&new_file_fcb, mode, 0);
     // generate a new fcb id for the new fcb
     uuid_generate(new_file_fcb_id);
-
-    // store the new fcb into database
-    write_to_db(new_file_fcb_id, &new_file_fcb, sizeof(fcb));
-
     // update parent directory entries
     rc = add_fcb_to_dir(&cur_dir, filename, new_file_fcb_id);
 
+    // store the new fcb into database
+    write_to_db(new_file_fcb_id, &new_file_fcb, sizeof(fcb));
     // update its parent directory in database
     write_to_db(cur_dir_id, &cur_dir, sizeof(fcb));
+    free(path_copy);
     return rc;
 }
 
@@ -663,11 +652,10 @@ static int myfs_utimens(const char *path, struct utimbuf *ubuf)
 {
     write_log("myfs_utimens(path=\"%s\")\n", path);
 
-    fcb cur_fcb;
     uuid_t fcb_id;
-
+    fcb cur_fcb;
     // read fcb information from path
-    int rc = get_fcb_by_path(path, &cur_fcb, &fcb_id, 0);
+    int rc = get_fcb_by_path(path, &fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
 
@@ -689,43 +677,41 @@ static int myfs_utimens(const char *path, struct utimbuf *ubuf)
  */
 static int myfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
+    if (size <= 0)
+        return -1;
     write_log("myfs_write(path=\"%s\", size=%d, offset=%lld,)\n", path, size, offset);
-    if (size == 0)
-        return 0;
 
     fcb cur_fcb;
     uuid_t cur_fcb_id;
-    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
+    int rc = get_fcb_by_path(path, &cur_fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
     if (!S_ISREG(cur_fcb.mode))
         return -EISDIR;
 
     int bytes_written = 0;
-    off_t remaining_offset = offset;
+    off_t original_offset = offset;
     uuid_t cur_data_block_id;
     file_data cur_data_block;
     fcb_iterator iterator = make_iterator(&cur_fcb, 1);
 
     while (get_next_data_block(&iterator, &cur_data_block, sizeof(file_data), &cur_data_block_id) != NULL)
     {
-        int cur_bytes_written = write_block(&cur_data_block, &buf[bytes_written], offset, size);
-        if (cur_bytes_written == -1)
-        {
-            offset -= BLOCK_SIZE;
-        }
-        else
-        {
-            write_to_db(cur_data_block_id, &cur_data_block, sizeof(file_data));
-            offset = max(0, offset - cur_bytes_written);
-            size -= cur_bytes_written;
-            bytes_written += cur_bytes_written;
-        }
         if (size == 0)
             break;
+        if (offset >= BLOCK_SIZE)
+        {
+            offset -= BLOCK_SIZE;
+            continue;
+        }
+        int cur_bytes_written = write_block(&cur_data_block, &buf[bytes_written], offset, size);
+        offset = max(0, offset - cur_bytes_written);
+        size -= cur_bytes_written;
+        bytes_written += cur_bytes_written;
+        write_to_db(cur_data_block_id, &cur_data_block, sizeof(file_data));
     }
 
-    cur_fcb.size = max(cur_fcb.size, remaining_offset + bytes_written);
+    cur_fcb.size = max(cur_fcb.size, original_offset + bytes_written);
     write_to_db(cur_fcb_id, &cur_fcb, sizeof(fcb));
 
     return bytes_written;
@@ -771,7 +757,7 @@ void truncate_direct_level(fcb *cur_fcb, off_t *remaining_size)
  */
 void truncate_indirect_level(fcb *cur_fcb, off_t *remaining_size)
 {
-    if (remaining_size == 0)
+    if (*remaining_size == 0)
     {
         if (uuid_compare(cur_fcb->indirect_data_block, zero_uuid) != 0)
         {
@@ -805,7 +791,7 @@ void truncate_indirect_level(fcb *cur_fcb, off_t *remaining_size)
 
         for (int index = 0; index < MAX_UUIDS_PER_BLOCK; index++)
         {
-            if (remaining_size == 0)
+            if (*remaining_size == 0)
             {
                 if (uuid_compare(blocks[index], zero_uuid) != 0)
                 {
@@ -821,8 +807,8 @@ void truncate_indirect_level(fcb *cur_fcb, off_t *remaining_size)
                     file_data new_block;
                     uuid_generate(new_block_id);
 
-                    new_block.size = (int)min(remaining_size, BLOCK_SIZE);
-                    remaining_size -= new_block.size;
+                    new_block.size = min(*remaining_size, BLOCK_SIZE);
+                    *remaining_size -= new_block.size;
 
                     write_to_db(new_block_id, &new_block, sizeof(file_data));
                     uuid_copy(blocks[index], new_block_id);
@@ -848,7 +834,7 @@ static int myfs_truncate(const char *path, off_t new_size)
     off_t remaining_size = new_size;
     uuid_t cur_fcb_id;
     fcb cur_fcb;
-    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
+    int rc = get_fcb_by_path(path, &cur_fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
 
@@ -877,7 +863,7 @@ static int myfs_chmod(const char *path, mode_t mode)
     fcb cur_fcb;
     uuid_t cur_fcb_id;
 
-    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
+    int rc = get_fcb_by_path(path, &cur_fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
 
@@ -904,7 +890,7 @@ static int myfs_chown(const char *path, uid_t uid, gid_t gid)
     fcb cur_fcb;
     uuid_t cur_fcb_id;
 
-    int rc = get_fcb_by_path(path, &cur_fcb, &cur_fcb_id, 0);
+    int rc = get_fcb_by_path(path, &cur_fcb_id, &cur_fcb, 0);
     if (rc != 0)
         return rc;
 
@@ -937,7 +923,7 @@ static int myfs_mkdir(const char *path, mode_t mode)
     // get fcb of parent directory
     fcb parent_dir;
     uuid_t parent_dir_id;
-    int rc = get_fcb_by_path(path, &parent_dir, &parent_dir_id, 1);
+    int rc = get_fcb_by_path(path, &parent_dir_id, &parent_dir, 1);
     if (rc != 0)
         return rc;
 
@@ -974,10 +960,10 @@ static int myfs_unlink(const char *path)
     fcb cur_fcb;
     uuid_t cur_fcb_id;
 
-    int rc = get_fcb_by_path(path, &parent_dir, NULL, 1);
+    int rc = get_fcb_by_path(path, NULL, &parent_dir, 1);
     if (rc != 0)
         return rc;
-    rc = get_fcb_from_dir(&parent_dir, filename, &cur_fcb, &cur_fcb_id);
+    rc = get_fcb_from_dir(&parent_dir, filename, &cur_fcb_id, &cur_fcb);
     if (rc != 0)
         return rc;
 
@@ -1005,12 +991,12 @@ static int myfs_rmdir(const char *path)
     char *filename = basename(path_copy);
 
     // get fcb of parent directory
-    int rc = get_fcb_by_path(path, &parent_dir, NULL, 1);
+    int rc = get_fcb_by_path(path, NULL, &parent_dir, 1);
     if (rc != 0)
         return rc;
 
     rc = delete_file_or_dir_from_dir(&parent_dir, filename, 1, 1);
-
+    free(path_copy);
     return rc;
 }
 
@@ -1031,26 +1017,24 @@ static int myfs_link(const char *from, const char *to)
     fcb dest_parent_fcb;
     uuid_t dest_fcb_id;
     fcb dest_fcb;
-    int rc = get_fcb_by_path(to, &dest_parent_fcb, &dest_parent_fcb_id, 1);
+    // get dest parent dir fcb
+    int rc = get_fcb_by_path(to, &dest_parent_fcb_id, &dest_parent_fcb, 1);
     if (rc != 0)
         return rc;
-    if (S_ISDIR(dest_parent_fcb.mode))
-    {
-        return -EISDIR;
-    }
-    rc = get_fcb_from_dir(&dest_parent_fcb, dest_filename, &dest_fcb, &dest_fcb_id);
+    // get dest fcb itself
+    rc = get_fcb_from_dir(&dest_parent_fcb, dest_filename, &dest_fcb_id, &dest_fcb);
     if (rc == 0)
         return -EEXIST;
+    if (S_ISDIR(dest_fcb.mode))
+        return -EISDIR;
 
     uuid_t src_fcb_id;
     fcb src_fcb;
-    rc = get_fcb_by_path(from, &src_fcb, &src_fcb_id, 0);
+    rc = get_fcb_by_path(from, &src_fcb_id, &src_fcb, 0);
     if (rc != 0)
         return rc;
     if (S_ISDIR(src_fcb.mode))
-    {
         return -EISDIR;
-    }
 
     // update dest parent dir
     add_fcb_to_dir(&dest_parent_fcb, dest_filename, src_fcb_id);
@@ -1058,6 +1042,7 @@ static int myfs_link(const char *from, const char *to)
 
     // update src file referencing count and database
     src_fcb.count += 1;
+    write_log("links: %d \n", src_fcb.count);
     write_to_db(src_fcb_id, &src_fcb, sizeof(fcb));
 
     free(to_copy);
@@ -1077,41 +1062,43 @@ static struct fuse_operations myfs_oper = {
     .truncate = myfs_truncate,
     .unlink = myfs_unlink,
     .chown = myfs_chown,
-    .chmod = myfs_chmod};
+    .chmod = myfs_chmod,
+    .link = myfs_link};
 
 /**
  * Initialize the file system before mounting
  */
 static void init_fs()
 {
-    int rc = unqlite_open(&pDb, DATABASE_NAME, UNQLITE_OPEN_CREATE);
+    int rc = 0;
+    printf("init_fs\n");
+	//Initialise the store.
+	uuid_clear(zero_uuid);
+
+    rc = unqlite_open(&pDb, DATABASE_NAME, UNQLITE_OPEN_CREATE);
     if (rc != UNQLITE_OK)
         error_handler(rc);
 
-    unqlite_int64 bytesRead;
-
-    rc = unqlite_kv_fetch(pDb, ROOT_OBJECT_KEY, KEY_SIZE, NULL, &bytesRead);
+    unqlite_int64 nBytes;
+    rc = unqlite_kv_fetch(pDb, ROOT_OBJECT_KEY, KEY_SIZE, NULL, &nBytes);
 
     if (rc == UNQLITE_NOTFOUND)
     {
-        perror("Root of filesystem not found. Creating it...\n");
-        fcb rootDirectory;
-
-        make_new_fcb(&rootDirectory, DEFAULT_DIR_MODE, 1);
-
-        rc = unqlite_kv_store(pDb, ROOT_OBJECT_KEY, KEY_SIZE, &rootDirectory, sizeof rootDirectory);
-
+        perror("init_store: root object was not found\n");
+        fcb the_root_fcb;
+        mode_t root_mode = S_IFDIR|S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH;
+        make_new_fcb(&the_root_fcb, root_mode, 1);
+        rc = unqlite_kv_store(pDb, ROOT_OBJECT_KEY, KEY_SIZE, &the_root_fcb, sizeof(fcb));
         error_handler(rc);
     }
     else
     {
-        perror("Root of filesystem found. Using it as the root folder...\n");
-        error_handler(rc);
-
-        if (bytesRead != sizeof(fcb))
-        {
-            perror("!!! Database is corrupted, exiting...\n");
-            exit(-1);
+        if(rc==UNQLITE_OK) { 
+	 		printf("init_store: root object was found\n"); 
+        }
+	 	if(nBytes!=sizeof(fcb)) { 
+			printf("Data object has unexpected size. Doing nothing.\n");
+			exit(-1);
         }
     }
 }
