@@ -12,18 +12,18 @@
 #define MAX_FILENAME_LENGTH 256
 #define BLOCK_SIZE 300 // 4 pages
 #define MAX_UUIDS_PER_BLOCK (BLOCK_SIZE / sizeof(uuid_t))
-
 #define NUMBER_DIRECT_BLOCKS 12
 #define MAX_INDEX_LEVEL 1
-
 #define MAX_FILE_SIZE (BLOCK_SIZE * NUMBER_DIRECT_BLOCKS + BLOCK_SIZE * MAX_UUIDS_PER_BLOCK)
 
-const mode_t DEFAULT_FILE_MODE = S_IFREG | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH;
-
-const mode_t DEFAULT_DIR_MODE = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
-
-#define max(x, y) (x > y ? x : y)
-#define min(x, y) (x > y ? y : x)
+#define max(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+     _a > _b ? _a : _b; })
+#define min(a,b) \
+   ({ __typeof__ (a) _a = (a); \
+       __typeof__ (b) _b = (b); \
+     _a > _b ? _b : _a; })
 
 typedef struct _fcb
 {
@@ -38,6 +38,8 @@ typedef struct _fcb
     time_t atime; // time of last access
     time_t mtime; // time of last modification
     time_t ctime; // time of last change to status
+
+    nlink_t count; // reference count
 } fcb;
 
 typedef struct _dir_entry
@@ -50,7 +52,7 @@ typedef struct _dir_entry
 
 typedef struct _dir_data
 {
-    int used_entries; // used entries
+    int cur_len; // used entries
     dir_entry entries[MAX_DIRECTORY_ENTRIES_PER_BLOCK];
 } dir_data;
 
