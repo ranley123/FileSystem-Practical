@@ -10,11 +10,11 @@
 #include <fuse.h>
 
 #define MAX_FILENAME_LENGTH 256
-#define BLOCK_SIZE 300 // 4 pages
+#define BLOCK_SIZE 4096 // 4 pages
 #define MAX_UUIDS_PER_BLOCK (BLOCK_SIZE / sizeof(uuid_t))
 #define NUMBER_DIRECT_BLOCKS 12
 #define MAX_INDEX_LEVEL 1
-#define MAX_FILE_SIZE (BLOCK_SIZE * NUMBER_DIRECT_BLOCKS + BLOCK_SIZE * MAX_UUIDS_PER_BLOCK)
+#define MAX_FILE_SIZE (BLOCK_SIZE * (NUMBER_DIRECT_BLOCKS + MAX_UUIDS_PER_BLOCK))
 
 #define max(a,b) \
    ({ __typeof__ (a) _a = (a); \
@@ -27,14 +27,12 @@
 
 typedef struct _fcb
 {
-    mode_t mode; // file mode
     uid_t uid;   // user id
     gid_t gid;   // group id
+    mode_t mode; // file mode
     off_t size;  // file size
-
     uuid_t data_blocks[NUMBER_DIRECT_BLOCKS]; // ids of direct blocks
     uuid_t indirect_data_block;               // id of indirect data block
-
     time_t atime; // time of last access
     time_t mtime; // time of last modification
     time_t ctime; // time of last change to status
@@ -48,8 +46,8 @@ typedef struct _dir_entry
     char name[MAX_FILENAME_LENGTH]; // filename
 } dir_entry;
 
-#define MAX_DIRECTORY_ENTRIES_PER_BLOCK (BLOCK_SIZE / sizeof(dir_entry))
 
+#define MAX_DIRECTORY_ENTRIES_PER_BLOCK (BLOCK_SIZE / sizeof(dir_entry))
 typedef struct _dir_data
 {
     int cur_len; // used entries
